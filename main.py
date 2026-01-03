@@ -131,21 +131,46 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
-        # SOFT INITIALIZATION: Instead of client.login() which can fail on datacenter IPs,
-        # we manually verify and inject the user profile
+        # SOFT INITIALIZATION: Try to verify tokens and get user info
         try:
             logger.info("Verifying session via garth profile...")
+            
+            # Debug: Check what garth has
+            logger.info(f"garth.oauth1_token exists: {client.garth.oauth1_token is not None}")
+            logger.info(f"garth.oauth2_token exists: {client.garth.oauth2_token is not None}")
+            
+            # Try to get profile
             user_profile = client.garth.profile
+            logger.info(f"Profile response: {user_profile}")
             
-            # Manually inject display_name and full_name
-            client.display_name = user_profile.get('displayName', user_profile.get('userName', 'Unknown'))
-            client.full_name = user_profile.get('fullName', '')
-            
-            logger.info(f"Session restored for: {client.display_name}")
+            if user_profile:
+                # Manually inject display_name and full_name
+                client.display_name = user_profile.get('displayName', user_profile.get('userName', 'Unknown'))
+                client.full_name = user_profile.get('fullName', '')
+                logger.info(f"Session restored for: {client.display_name}")
+            else:
+                # Profile is None/empty - try alternative method
+                logger.warning("Profile is empty, trying direct API call...")
+                
+                # Try to get user settings directly
+                try:
+                    settings = client.garth.connectapi("/userprofile-service/socialProfile")
+                    logger.info(f"Social profile response: {settings}")
+                    if settings:
+                        client.display_name = settings.get('displayName', 'User')
+                        client.full_name = settings.get('fullName', '')
+                        logger.info(f"Session restored via social profile: {client.display_name}")
+                    else:
+                        raise Exception("Could not retrieve user profile")
+                except Exception as api_error:
+                    logger.error(f"Direct API call failed: {api_error}")
+                    raise
             
         except Exception as profile_error:
-            # If this fails, tokens are invalid or IP is blocked
-            logger.error(f"Token validation failed (IP Block?): {profile_error}")
+            # Log full error details
+            import traceback
+            logger.error(f"Token validation failed: {type(profile_error).__name__}: {profile_error}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
             return None
         
         garmin_client = client
