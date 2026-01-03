@@ -1,7 +1,7 @@
 """
 Health OS API v3 - Complete version
 - Garmin: Token-based authentication (generate tokens locally first)
-- YAZIO: OAuth with correct client credentials (v15 API)
+- YAZIO: OAuth with correct client credentials (Auth v15, Data v1)
 
 Deploy on Railway
 """
@@ -50,8 +50,10 @@ GARMIN_OAUTH_TOKEN = os.getenv("GARMIN_OAUTH_TOKEN")
 YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
 YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 
-# YAZIO Client credentials (v15 API)
-YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
+# YAZIO Client credentials
+# Auth is on v15 (yzapi.yazio.com), but data endpoints are on v1 (api.yazio.com)!
+YAZIO_AUTH_URL = "https://yzapi.yazio.com/v15"
+YAZIO_DATA_URL = "https://api.yazio.com/v1"
 YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
 YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
 
@@ -228,7 +230,7 @@ def fetch_garmin_data(target_date: date) -> dict:
         return {"error": str(e)}
 
 # ============================================
-# YAZIO FUNCTIONS (v15 API)
+# YAZIO FUNCTIONS (Auth v15, Data v1)
 # ============================================
 
 async def yazio_login() -> Optional[str]:
@@ -259,9 +261,9 @@ async def yazio_login() -> Optional[str]:
         }
         
         async with httpx.AsyncClient() as client:
-            # Use v15 endpoint
+            # Auth uses v15 endpoint on yzapi.yazio.com
             response = await client.post(
-                f"{YAZIO_BASE_URL}/oauth/token",
+                f"{YAZIO_AUTH_URL}/oauth/token",
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
@@ -312,9 +314,9 @@ async def fetch_yazio_data(target_date: date) -> dict:
     
     try:
         async with httpx.AsyncClient() as client:
-            # Correct endpoint: /users/{userId}/diary/{date}/summary
+            # Data uses v1 endpoint on api.yazio.com (NOT v15!)
             response = await client.get(
-                f"{YAZIO_BASE_URL}/users/{user_id}/diary/{date_str}/summary",
+                f"{YAZIO_DATA_URL}/users/{user_id}/diary/{date_str}/summary",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
