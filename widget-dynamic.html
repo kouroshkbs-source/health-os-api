@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Health OS</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800;900&display=swap" rel="stylesheet">
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: transparent;
+            padding: 8px;
+        }
+        
+        .blob {
+            position: absolute;
+            border-radius: 50%;
+            filter: blur(80px);
+            transition: transform 0.15s ease-out;
+            pointer-events: none;
+        }
+        
+        .noise {
+            position: absolute;
+            inset: 0;
+            background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 256 256' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='noise'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23noise)'/%3E%3C/svg%3E");
+            opacity: 0.03;
+            pointer-events: none;
+        }
+
+        .loading-pulse {
+            animation: pulse 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useRef, useCallback, useEffect } = React;
+
+        // ============================================
+        // CONFIGURATION - MODIFIER CETTE URL
+        // ============================================
+        const API_URL = "https://YOUR-RAILWAY-APP.railway.app/sync";
+        
+        // Données par défaut (affichées pendant le chargement ou en cas d'erreur)
+        const DEFAULT_DATA = {
+            date: new Date().toISOString().split('T')[0],
+            bodyBattery: 0,
+            sleepScore: 0,
+            sleepDuration: "0h 00",
+            weight: 0,
+            weightChange: 0,
+            calories: 0,
+            caloriesGoal: 2000,
+            protein: 0,
+            proteinGoal: 150,
+            carbs: 0,
+            carbsGoal: 250,
+            fat: 0,
+            fatGoal: 70,
+        };
+
+        // Couleurs des macros (= couleurs des blobs)
+        const COLORS = {
+            protein: 'rgb(232, 121, 249)',  // Fuchsia
+            carbs: 'rgb(34, 211, 238)',     // Cyan
+            fat: 'rgb(139, 92, 246)',       // Violet
+            accent: 'rgb(52, 211, 153)',    // Emerald
+        };
+
+        // ============================================
+        // FORMAT DATE
+        // ============================================
+        const formatDate = (dateStr) => {
+            const date = new Date(dateStr);
+            const days = ['DIM', 'LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM'];
+            const months = ['JAN', 'FÉV', 'MAR', 'AVR', 'MAI', 'JUN', 'JUL', 'AOÛ', 'SEP', 'OCT', 'NOV', 'DÉC'];
+            return `${days[date.getDay()]} ${date.getDate().toString().padStart(2, '0')} ${months[date.getMonth()]}`;
+        };
+
+        // ============================================
+        // HEALTH OS WIDGET
+        // ============================================
+        const HealthOS = () => {
+            const containerRef = useRef(null);
+            const [mousePos, setMousePos] = useState({ x: 0.5, y: 0.5 });
+            const [data, setData] = useState(DEFAULT_DATA);
+            const [loading, setLoading] = useState(true);
+            const [error, setError] = useState(null);
+
+            // Fetch data from API
+            useEffect(() => {
+                const fetchData = async () => {
+                    try {
+                        setLoading(true);
+                        const response = await fetch(API_URL);
+                        if (!response.ok) {
+                            throw new Error(`HTTP error! status: ${response.status}`);
+                        }
+                        const jsonData = await response.json();
+                        setData(jsonData);
+                        setError(null);
+                    } catch (err) {
+                        console.error('Error fetching health data:', err);
+                        setError(err.message);
+                        // Keep default data on error
+                    } finally {
+                        setLoading(false);
+                    }
+                };
+
+                fetchData();
+                
+                // Refresh every 30 minutes
+                const interval = setInterval(fetchData, 30 * 60 * 1000);
+                return () => clearInterval(interval);
+            }, []);
+
+            const handleMouseMove = useCallback((e) => {
+                if (containerRef.current) {
+                    const rect = containerRef.current.getBoundingClientRect();
+                    setMousePos({
+                        x: (e.clientX - rect.left) / rect.width,
+                        y: (e.clientY - rect.top) / rect.height
+                    });
+                }
+            }, []);
+
+            // Calcul des positions des blobs réactifs
+            const blob1X = (mousePos.x - 0.5) * 200;
+            const blob1Y = (mousePos.y - 0.5) * 150;
+            const blob2X = (mousePos.x - 0.5) * -150;
+            const blob2Y = (mousePos.y - 0.5) * -120;
+            const blob3X = (mousePos.x - 0.5) * 120;
+            const blob3Y = (mousePos.y - 0.5) * -180;
+            const blob4X = (mousePos.x - 0.5) * -100;
+            const blob4Y = (mousePos.y - 0.5) * 100;
+
+            // Calcul des pourcentages
+            const caloriesPct = (data.calories / data.caloriesGoal) * 100;
+            const proteinPct = (data.protein / data.proteinGoal) * 100;
+            const carbsPct = (data.carbs / data.carbsGoal) * 100;
+            const fatPct = (data.fat / data.fatGoal) * 100;
+
+            return (
+                <div 
+                    ref={containerRef}
+                    onMouseMove={handleMouseMove}
+                    className="relative overflow-hidden w-full"
+                    style={{ background: '#050508', padding: '32px', minHeight: '480px', borderRadius: '24px' }}
+                >
+                    {/* Blobs réactifs */}
+                    <div className="blob w-72 h-72" style={{ top: '-10%', right: '15%', transform: `translate(${blob1X}px, ${blob1Y}px)`, background: COLORS.protein, opacity: 0.4 }}></div>
+                    <div className="blob w-80 h-80" style={{ bottom: '-10%', left: '0%', transform: `translate(${blob2X}px, ${blob2Y}px)`, background: COLORS.carbs, opacity: 0.4 }}></div>
+                    <div className="blob w-64 h-64" style={{ top: '30%', left: '40%', transform: `translate(${blob3X}px, ${blob3Y}px)`, background: COLORS.fat, opacity: 0.3 }}></div>
+                    <div className="blob w-56 h-56" style={{ top: '60%', right: '30%', transform: `translate(${blob4X}px, ${blob4Y}px)`, background: 'rgb(59, 130, 246)', opacity: 0.3 }}></div>
+                    
+                    <div className="noise"></div>
+                    
+                    {/* Contenu */}
+                    <div className={`relative z-10 max-w-4xl mx-auto ${loading ? 'loading-pulse' : ''}`}>
+                        {/* Header */}
+                        <div className="flex justify-between items-center mb-8">
+                            <div className="text-[11px] font-semibold tracking-[0.25em] text-white/30">
+                                {formatDate(data.date)}
+                            </div>
+                            <div className="text-[11px] font-semibold tracking-[0.25em]" style={{ color: COLORS.protein, opacity: 0.6 }}>
+                                HEALTH OS
+                                {error && <span className="ml-2 text-red-400">⚠️</span>}
+                            </div>
+                        </div>
+
+                        {/* Stats principales */}
+                        <div className="flex items-end justify-between mb-10">
+                            <div>
+                                <div className="text-[11px] font-semibold tracking-[0.3em] text-white/30 mb-2">READINESS</div>
+                                <div className="text-[130px] font-black leading-none text-white" style={{ letterSpacing: '-0.03em' }}>
+                                    {data.bodyBattery}
+                                </div>
+                            </div>
+
+                            <div className="text-right">
+                                <div className="text-[11px] font-semibold tracking-[0.3em] text-white/30 mb-2">CALORIES</div>
+                                <div className="text-[72px] font-extrabold leading-none text-white" style={{ letterSpacing: '-0.02em' }}>
+                                    {data.calories}
+                                </div>
+                                <div className="text-lg font-medium text-white/40 mt-1">/ {data.caloriesGoal} kcal</div>
+                                <div className="w-48 h-3 bg-white/10 rounded-full overflow-hidden mt-3 ml-auto">
+                                    <div 
+                                        className="h-full rounded-full transition-all duration-500"
+                                        style={{ width: `${Math.min(caloriesPct, 100)}%`, background: 'linear-gradient(90deg, rgba(255,255,255,0.8), rgba(255,255,255,0.6))' }}
+                                    ></div>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Stats secondaires */}
+                        <div className="grid grid-cols-3 gap-8 mb-10">
+                            <div>
+                                <div className="text-[10px] font-semibold tracking-[0.2em] text-white/30 mb-1">POIDS</div>
+                                <div className="text-4xl font-bold text-white">
+                                    {data.weight}
+                                    <span className="text-lg ml-2 font-semibold" style={{ color: data.weightChange < 0 ? COLORS.accent : '#f87171' }}>
+                                        {data.weightChange < 0 ? '↓' : data.weightChange > 0 ? '↑' : ''}{Math.abs(data.weightChange)}
+                                    </span>
+                                </div>
+                            </div>
+                            <div>
+                                <div className="text-[10px] font-semibold tracking-[0.2em] text-white/30 mb-1">SOMMEIL</div>
+                                <div className="text-4xl font-bold text-white">{data.sleepDuration}</div>
+                            </div>
+                            <div>
+                                <div className="text-[10px] font-semibold tracking-[0.2em] text-white/30 mb-1">SLEEP SCORE</div>
+                                <div className="text-4xl font-bold text-white">
+                                    {data.sleepScore}<span className="text-lg text-white/40">%</span>
+                                </div>
+                            </div>
+                        </div>
+
+                        {/* Barres de macros */}
+                        <div className="space-y-4">
+                            <div className="flex items-center gap-4">
+                                <div className="text-[11px] font-bold tracking-[0.15em] text-white/50 w-20">PROT</div>
+                                <div className="flex-1 h-4 bg-white/10 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(proteinPct, 100)}%`, background: COLORS.protein }}></div>
+                                </div>
+                                <div className="text-base font-bold w-16 text-right" style={{ color: COLORS.protein }}>{data.protein}g</div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="text-[11px] font-bold tracking-[0.15em] text-white/50 w-20">GLUC</div>
+                                <div className="flex-1 h-4 bg-white/10 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(carbsPct, 100)}%`, background: COLORS.carbs }}></div>
+                                </div>
+                                <div className="text-base font-bold w-16 text-right" style={{ color: COLORS.carbs }}>{data.carbs}g</div>
+                            </div>
+                            <div className="flex items-center gap-4">
+                                <div className="text-[11px] font-bold tracking-[0.15em] text-white/50 w-20">LIP</div>
+                                <div className="flex-1 h-4 bg-white/10 rounded-full overflow-hidden">
+                                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${Math.min(fatPct, 100)}%`, background: COLORS.fat }}></div>
+                                </div>
+                                <div className="text-base font-bold w-16 text-right" style={{ color: COLORS.fat }}>{data.fat}g</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            );
+        };
+
+        ReactDOM.render(<HealthOS />, document.getElementById('root'));
+    </script>
+</body>
+</html>
