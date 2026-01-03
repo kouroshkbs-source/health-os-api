@@ -1,0 +1,31 @@
+name: Daily Health Sync
+
+on:
+  schedule:
+    # Lance le script tous les jours à 06h00 UTC (07h00 heure belge)
+    - cron: '0 6 * * *'
+  workflow_dispatch: # Bouton pour lancer manuellement
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install garth python-garminconnect httpx
+
+    - name: Run Sync Script
+      env:
+        GARMIN_OAUTH_TOKEN: ${{ secrets.GARMIN_OAUTH_TOKEN }}
+        GARMIN_DISPLAY_NAME: ${{ secrets.GARMIN_DISPLAY_NAME }}
+      run: python sync_garmin.py
