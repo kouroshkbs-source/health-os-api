@@ -1,7 +1,7 @@
 """
 Health OS API v3 - Complete version
 - Garmin: Token-based authentication (generate tokens locally first)
-- YAZIO: OAuth with correct client credentials
+- YAZIO: OAuth with correct client credentials (v15 API)
 
 Deploy on Railway
 """
@@ -50,11 +50,10 @@ GARMIN_OAUTH_TOKEN = os.getenv("GARMIN_OAUTH_TOKEN")
 YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
 YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 
-# YAZIO Client credentials (from saganos/yazio_public_api)
+# YAZIO Client credentials (v15 API)
+YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
 YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
 YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
-YAZIO_TOKEN_URL = "https://yzapi.yazio.com/v5/oauth/token"
-YAZIO_API_URL = "https://yzapi.yazio.com"
 
 # Token storage
 garmin_client = None
@@ -229,7 +228,7 @@ def fetch_garmin_data(target_date: date) -> dict:
         return {"error": str(e)}
 
 # ============================================
-# YAZIO FUNCTIONS (with correct credentials)
+# YAZIO FUNCTIONS (v15 API)
 # ============================================
 
 async def yazio_login() -> Optional[str]:
@@ -250,7 +249,7 @@ async def yazio_login() -> Optional[str]:
     try:
         logger.info(f"Logging into YAZIO with {YAZIO_EMAIL}...")
         
-        # Request body as JSON (not form-urlencoded!)
+        # Request body as JSON
         payload = {
             "client_id": YAZIO_CLIENT_ID,
             "client_secret": YAZIO_CLIENT_SECRET,
@@ -260,9 +259,10 @@ async def yazio_login() -> Optional[str]:
         }
         
         async with httpx.AsyncClient() as client:
+            # Use v15 endpoint
             response = await client.post(
-                YAZIO_TOKEN_URL,
-                json=payload,  # JSON body, not form data
+                f"{YAZIO_BASE_URL}/oauth/token",
+                json=payload,
                 headers={
                     "Content-Type": "application/json",
                     "Accept": "application/json",
@@ -309,9 +309,9 @@ async def fetch_yazio_data(target_date: date) -> dict:
     
     try:
         async with httpx.AsyncClient() as client:
-            # Try v10 endpoint first (newer API)
+            # Use v15 endpoint
             response = await client.get(
-                f"{YAZIO_API_URL}/v10/user/day/{date_str}",
+                f"{YAZIO_BASE_URL}/user/day/{date_str}",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
@@ -340,23 +340,6 @@ async def fetch_yazio_data(target_date: date) -> dict:
                 
                 logger.info(f"YAZIO: {data['calories']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
                 
-            elif response.status_code == 404:
-                # Try alternative endpoint
-                logger.info("Trying alternative YAZIO endpoint...")
-                response2 = await client.get(
-                    f"{YAZIO_API_URL}/v5/user/day/{date_str}",
-                    headers={
-                        "Authorization": f"Bearer {token}",
-                        "Accept": "application/json",
-                    }
-                )
-                if response2.status_code == 200:
-                    day_data = response2.json()
-                    # Parse v5 format (might be different)
-                    logger.info(f"YAZIO v5 data: {day_data}")
-                else:
-                    logger.error(f"YAZIO v5 also failed: {response2.status_code}")
-                    return {"error": f"YAZIO API error: {response2.status_code}"}
             else:
                 logger.error(f"YAZIO fetch failed: {response.status_code} - {response.text}")
                 return {"error": f"YAZIO API error: {response.status_code}"}
