@@ -307,14 +307,18 @@ async def fetch_yazio_data(target_date: date) -> dict:
     
     date_str = target_date.strftime("%Y-%m-%d")
     
+    # User ID - can be retrieved from /v15/user endpoint or hardcoded
+    user_id = os.getenv("YAZIO_USER_ID", "b0a3c6b18841")
+    
     try:
         async with httpx.AsyncClient() as client:
-            # Use v15 endpoint
+            # Correct endpoint: /users/{userId}/diary/{date}/summary
             response = await client.get(
-                f"{YAZIO_BASE_URL}/user/day/{date_str}",
+                f"{YAZIO_BASE_URL}/users/{user_id}/diary/{date_str}/summary",
                 headers={
                     "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
+                    "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)",
                 }
             )
             
@@ -323,20 +327,30 @@ async def fetch_yazio_data(target_date: date) -> dict:
             if response.status_code == 200:
                 day_data = response.json()
                 logger.info(f"YAZIO day data keys: {list(day_data.keys())}")
+                logger.info(f"YAZIO raw response: {day_data}")
                 
-                # Extract consumed values
-                consumed = day_data.get("consumed", {})
-                data["calories"] = int(consumed.get("energy_kcal", 0) or consumed.get("energy", 0) or 0)
-                data["protein"] = int(consumed.get("proteins", 0) or consumed.get("protein", 0) or 0)
-                data["carbs"] = int(consumed.get("carbohydrates", 0) or consumed.get("carbs", 0) or 0)
-                data["fat"] = int(consumed.get("fat", 0) or 0)
+                # Try nutrition_daily structure first
+                nutrition = day_data.get("nutrition_daily", {})
+                if nutrition:
+                    data["calories"] = int(nutrition.get("calories", 0) or nutrition.get("energy", 0) or 0)
+                    data["protein"] = int(nutrition.get("protein", 0) or nutrition.get("proteins", 0) or 0)
+                    data["carbs"] = int(nutrition.get("carbohydrates", 0) or nutrition.get("carbs", 0) or 0)
+                    data["fat"] = int(nutrition.get("fat", 0) or 0)
+                else:
+                    # Fallback to consumed structure
+                    consumed = day_data.get("consumed", {})
+                    data["calories"] = int(consumed.get("energy_kcal", 0) or consumed.get("calories", 0) or 0)
+                    data["protein"] = int(consumed.get("proteins", 0) or consumed.get("protein", 0) or 0)
+                    data["carbs"] = int(consumed.get("carbohydrates", 0) or consumed.get("carbs", 0) or 0)
+                    data["fat"] = int(consumed.get("fat", 0) or 0)
                 
-                # Extract goals
-                goal = day_data.get("goal", {})
-                data["caloriesGoal"] = int(goal.get("energy_kcal", 2000) or goal.get("energy", 2000) or 2000)
-                data["proteinGoal"] = int(goal.get("proteins", 150) or goal.get("protein", 150) or 150)
-                data["carbsGoal"] = int(goal.get("carbohydrates", 250) or goal.get("carbs", 250) or 250)
-                data["fatGoal"] = int(goal.get("fat", 70) or 70)
+                # Extract goals if available
+                goal = day_data.get("goal", {}) or day_data.get("nutrition_goal", {})
+                if goal:
+                    data["caloriesGoal"] = int(goal.get("calories", 2000) or goal.get("energy_kcal", 2000) or 2000)
+                    data["proteinGoal"] = int(goal.get("protein", 150) or goal.get("proteins", 150) or 150)
+                    data["carbsGoal"] = int(goal.get("carbohydrates", 250) or goal.get("carbs", 250) or 250)
+                    data["fatGoal"] = int(goal.get("fat", 70) or 70)
                 
                 logger.info(f"YAZIO: {data['calories']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
                 
