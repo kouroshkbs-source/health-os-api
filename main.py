@@ -53,7 +53,7 @@ YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 # YAZIO Client credentials
 # Auth is on v15 (yzapi.yazio.com), but data endpoints are on v1 (api.yazio.com)!
 YAZIO_AUTH_URL = "https://yzapi.yazio.com/v15"
-YAZIO_DATA_URL = "https://api.yazio.com/v1"
+YAZIO_DATA_URL = "https://yzapi.yazio.com/v1"
 YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
 YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
 
