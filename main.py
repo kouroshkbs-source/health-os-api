@@ -1,18 +1,21 @@
 """
-Health OS API - Fetches data from Garmin Connect and YAZIO
-Deploy on Railway, called by N8N daily
+Health OS API v3 - Complete version
+- Garmin: Token-based authentication (generate tokens locally first)
+- YAZIO: OAuth with correct client credentials
+
+Deploy on Railway
 """
 
 import os
 import json
 import logging
-from datetime import datetime, date
+import tempfile
+from datetime import datetime, date, timedelta
 from typing import Optional
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from garminconnect import Garmin, GarminConnectAuthenticationError
 
 # ============================================
 # CONFIGURATION
@@ -24,10 +27,10 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="1.0.0"
+    version="3.0.0"
 )
 
-# CORS for testing
+# CORS for widget access
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -40,14 +43,21 @@ app.add_middleware(
 # ENVIRONMENT VARIABLES
 # ============================================
 
-GARMIN_EMAIL = os.getenv("GARMIN_EMAIL")
-GARMIN_PASSWORD = os.getenv("GARMIN_PASSWORD")
+# Garmin OAuth token (JSON string from local auth script)
+GARMIN_OAUTH_TOKEN = os.getenv("GARMIN_OAUTH_TOKEN")
+
+# YAZIO credentials
 YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
 YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 
-# Token storage (in-memory, will reset on restart)
-# For production, consider using Redis or a file
-garmin_client: Optional[Garmin] = None
+# YAZIO Client credentials (from saganos/yazio_public_api)
+YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
+YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
+YAZIO_TOKEN_URL = "https://yzapi.yazio.com/v5/oauth/token"
+YAZIO_API_URL = "https://yzapi.yazio.com"
+
+# Token storage
+garmin_client = None
 yazio_token: Optional[dict] = None
 
 # ============================================
@@ -74,34 +84,63 @@ class HealthData(BaseModel):
     # Meta
     lastUpdated: str = ""
     errors: list = []
+    sources: list = []
 
 # ============================================
-# GARMIN FUNCTIONS
+# GARMIN FUNCTIONS (Token-based)
 # ============================================
 
-def get_garmin_client() -> Optional[Garmin]:
-    """Initialize or return cached Garmin client"""
+def get_garmin_client():
+    """Initialize Garmin client using pre-generated OAuth tokens"""
     global garmin_client
-    
-    if not GARMIN_EMAIL or not GARMIN_PASSWORD:
-        logger.warning("Garmin credentials not set")
-        return None
     
     if garmin_client is not None:
         return garmin_client
     
+    if not GARMIN_OAUTH_TOKEN:
+        logger.warning("GARMIN_OAUTH_TOKEN not set")
+        return None
+    
     try:
-        logger.info("Logging into Garmin Connect...")
-        client = Garmin(GARMIN_EMAIL, GARMIN_PASSWORD)
-        client.login()
+        from garminconnect import Garmin
+        
+        logger.info("Initializing Garmin client with OAuth tokens...")
+        
+        # Parse the token JSON
+        token_data = json.loads(GARMIN_OAUTH_TOKEN)
+        
+        # Create a temporary directory to store the token files
+        temp_dir = tempfile.mkdtemp()
+        token_file = os.path.join(temp_dir, "oauth2_token.json")
+        
+        with open(token_file, 'w') as f:
+            json.dump(token_data, f)
+        
+        # Also create oauth1_token.json (can be empty)
+        oauth1_file = os.path.join(temp_dir, "oauth1_token.json")
+        with open(oauth1_file, 'w') as f:
+            json.dump({}, f)
+        
+        # Initialize client WITHOUT credentials
+        client = Garmin()
+        
+        # Load the saved tokens
+        client.garth.load(temp_dir)
+        
+        # Verify the session works
+        logger.info("Verifying Garmin session...")
+        name = client.get_full_name()
+        logger.info(f"Garmin connected as: {name}")
+        
         garmin_client = client
-        logger.info("Garmin login successful")
         return client
-    except GarminConnectAuthenticationError as e:
-        logger.error(f"Garmin authentication failed: {e}")
+        
+    except json.JSONDecodeError as e:
+        logger.error(f"Invalid GARMIN_OAUTH_TOKEN JSON: {e}")
         return None
     except Exception as e:
-        logger.error(f"Garmin connection error: {e}")
+        logger.error(f"Garmin connection error: {type(e).__name__}: {e}")
+        garmin_client = None
         return None
 
 
@@ -110,7 +149,7 @@ def fetch_garmin_data(target_date: date) -> dict:
     client = get_garmin_client()
     
     if client is None:
-        return {"error": "Garmin not connected"}
+        return {"error": "Garmin not connected - set GARMIN_OAUTH_TOKEN"}
     
     data = {
         "bodyBattery": 0,
@@ -126,17 +165,17 @@ def fetch_garmin_data(target_date: date) -> dict:
         # Body Battery
         try:
             bb_data = client.get_body_battery(date_str)
-            if bb_data and len(bb_data) > 0:
-                # Get the latest body battery value
-                latest = bb_data[-1] if isinstance(bb_data, list) else bb_data
-                if isinstance(latest, dict) and "chargedValue" in latest:
-                    data["bodyBattery"] = latest.get("chargedValue", 0)
-                elif isinstance(bb_data, list) and len(bb_data) > 0:
-                    # Sometimes it's a list of values
-                    for item in reversed(bb_data):
-                        if isinstance(item, dict) and item.get("chargedValue"):
-                            data["bodyBattery"] = item["chargedValue"]
-                            break
+            if bb_data:
+                if isinstance(bb_data, list) and len(bb_data) > 0:
+                    max_bb = 0
+                    for item in bb_data:
+                        if isinstance(item, dict):
+                            val = item.get("chargedValue", 0) or item.get("bodyBatteryLevel", 0) or 0
+                            if val > max_bb:
+                                max_bb = val
+                    data["bodyBattery"] = max_bb
+                elif isinstance(bb_data, dict):
+                    data["bodyBattery"] = bb_data.get("chargedValue", 0) or 0
             logger.info(f"Body Battery: {data['bodyBattery']}")
         except Exception as e:
             logger.warning(f"Could not fetch body battery: {e}")
@@ -145,9 +184,13 @@ def fetch_garmin_data(target_date: date) -> dict:
         try:
             sleep_data = client.get_sleep_data(date_str)
             if sleep_data:
-                # Sleep score
                 daily_sleep = sleep_data.get("dailySleepDTO", {})
-                data["sleepScore"] = daily_sleep.get("sleepScores", {}).get("overall", {}).get("value", 0)
+                
+                # Sleep score
+                sleep_scores = daily_sleep.get("sleepScores", {})
+                if sleep_scores:
+                    overall = sleep_scores.get("overall", {})
+                    data["sleepScore"] = overall.get("value", 0) if isinstance(overall, dict) else 0
                 
                 # Sleep duration
                 sleep_seconds = daily_sleep.get("sleepTimeSeconds", 0)
@@ -161,41 +204,35 @@ def fetch_garmin_data(target_date: date) -> dict:
         
         # Weight
         try:
-            # Get weight for the past 7 days to calculate change
-            from datetime import timedelta
             start_date = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
             weight_data = client.get_body_composition(start_date, date_str)
             
-            if weight_data and "dateWeightList" in weight_data:
-                weights = weight_data["dateWeightList"]
-                if len(weights) > 0:
-                    # Latest weight (in grams, convert to kg)
-                    latest_weight = weights[-1].get("weight", 0) / 1000
-                    data["weight"] = round(latest_weight, 1)
-                    
-                    # Calculate change if we have previous data
-                    if len(weights) > 1:
-                        previous_weight = weights[0].get("weight", 0) / 1000
-                        data["weightChange"] = round(latest_weight - previous_weight, 1)
-            logger.info(f"Weight: {data['weight']} kg, Change: {data['weightChange']} kg")
+            if weight_data:
+                weights = weight_data.get("dateWeightList", []) or weight_data.get("weightList", [])
+                if weights and len(weights) > 0:
+                    latest = weights[-1]
+                    weight_grams = latest.get("weight", 0)
+                    if weight_grams > 0:
+                        data["weight"] = round(weight_grams / 1000, 1)
+                        
+                        if len(weights) > 1:
+                            first_weight = weights[0].get("weight", 0) / 1000
+                            data["weightChange"] = round(data["weight"] - first_weight, 1)
+            logger.info(f"Weight: {data['weight']} kg")
         except Exception as e:
             logger.warning(f"Could not fetch weight data: {e}")
         
         return data
         
     except Exception as e:
-        logger.error(f"Error fetching Garmin data: {e}")
+        logger.error(f"Error fetching Garmin data: {type(e).__name__}: {e}")
         return {"error": str(e)}
 
 # ============================================
-# YAZIO FUNCTIONS
+# YAZIO FUNCTIONS (with correct credentials)
 # ============================================
 
-YAZIO_BASE_URL = "https://yzapi.yazio.com"
-YAZIO_CLIENT_ID = "de.yazio.mobile.v8"
-YAZIO_CLIENT_SECRET = "b6dfc6b4c76f8285ac94de67c52ca5"  # Public client secret from app
-
-async def yazio_login() -> Optional[dict]:
+async def yazio_login() -> Optional[str]:
     """Login to YAZIO and get access token"""
     global yazio_token
     
@@ -204,41 +241,49 @@ async def yazio_login() -> Optional[dict]:
         return None
     
     # Check if we have a valid cached token
-    if yazio_token and yazio_token.get("expires_at", 0) > datetime.now().timestamp():
-        return yazio_token
+    if yazio_token:
+        expires_at = yazio_token.get("expires_at", 0)
+        if expires_at > datetime.now().timestamp():
+            logger.info("Using cached YAZIO token")
+            return yazio_token.get("access_token")
     
     try:
-        logger.info("Logging into YAZIO...")
+        logger.info(f"Logging into YAZIO with {YAZIO_EMAIL}...")
+        
+        # Request body as JSON (not form-urlencoded!)
+        payload = {
+            "client_id": YAZIO_CLIENT_ID,
+            "client_secret": YAZIO_CLIENT_SECRET,
+            "username": YAZIO_EMAIL,
+            "password": YAZIO_PASSWORD,
+            "grant_type": "password"
+        }
+        
         async with httpx.AsyncClient() as client:
             response = await client.post(
-                f"{YAZIO_BASE_URL}/v10/oauth/token",
-                data={
-                    "grant_type": "password",
-                    "username": YAZIO_EMAIL,
-                    "password": YAZIO_PASSWORD,
-                    "client_id": YAZIO_CLIENT_ID,
-                    "client_secret": YAZIO_CLIENT_SECRET,
-                },
+                YAZIO_TOKEN_URL,
+                json=payload,  # JSON body, not form data
                 headers={
-                    "Content-Type": "application/x-www-form-urlencoded",
+                    "Content-Type": "application/json",
                     "Accept": "application/json",
                 }
             )
             
+            logger.info(f"YAZIO login response status: {response.status_code}")
+            
             if response.status_code == 200:
                 token_data = response.json()
-                # Calculate expiration time
-                expires_in = token_data.get("expires_in", 3600)
+                expires_in = token_data.get("expires_in", 172800)  # Default 48h
                 token_data["expires_at"] = datetime.now().timestamp() + expires_in
                 yazio_token = token_data
-                logger.info("YAZIO login successful")
-                return token_data
+                logger.info("YAZIO login successful!")
+                return token_data.get("access_token")
             else:
                 logger.error(f"YAZIO login failed: {response.status_code} - {response.text}")
                 return None
                 
     except Exception as e:
-        logger.error(f"YAZIO login error: {e}")
+        logger.error(f"YAZIO login error: {type(e).__name__}: {e}")
         return None
 
 
@@ -264,33 +309,54 @@ async def fetch_yazio_data(target_date: date) -> dict:
     
     try:
         async with httpx.AsyncClient() as client:
-            # Fetch daily summary
+            # Try v10 endpoint first (newer API)
             response = await client.get(
-                f"{YAZIO_BASE_URL}/v10/user/day/{date_str}",
+                f"{YAZIO_API_URL}/v10/user/day/{date_str}",
                 headers={
-                    "Authorization": f"Bearer {token['access_token']}",
+                    "Authorization": f"Bearer {token}",
                     "Accept": "application/json",
                 }
             )
             
+            logger.info(f"YAZIO day data response status: {response.status_code}")
+            
             if response.status_code == 200:
                 day_data = response.json()
+                logger.info(f"YAZIO day data keys: {list(day_data.keys())}")
                 
                 # Extract consumed values
                 consumed = day_data.get("consumed", {})
-                data["calories"] = int(consumed.get("energy_kcal", 0))
-                data["protein"] = int(consumed.get("proteins", 0))
-                data["carbs"] = int(consumed.get("carbohydrates", 0))
-                data["fat"] = int(consumed.get("fat", 0))
+                data["calories"] = int(consumed.get("energy_kcal", 0) or consumed.get("energy", 0) or 0)
+                data["protein"] = int(consumed.get("proteins", 0) or consumed.get("protein", 0) or 0)
+                data["carbs"] = int(consumed.get("carbohydrates", 0) or consumed.get("carbs", 0) or 0)
+                data["fat"] = int(consumed.get("fat", 0) or 0)
                 
                 # Extract goals
                 goal = day_data.get("goal", {})
-                data["caloriesGoal"] = int(goal.get("energy_kcal", 2000))
-                data["proteinGoal"] = int(goal.get("proteins", 150))
-                data["carbsGoal"] = int(goal.get("carbohydrates", 250))
-                data["fatGoal"] = int(goal.get("fat", 70))
+                data["caloriesGoal"] = int(goal.get("energy_kcal", 2000) or goal.get("energy", 2000) or 2000)
+                data["proteinGoal"] = int(goal.get("proteins", 150) or goal.get("protein", 150) or 150)
+                data["carbsGoal"] = int(goal.get("carbohydrates", 250) or goal.get("carbs", 250) or 250)
+                data["fatGoal"] = int(goal.get("fat", 70) or 70)
                 
-                logger.info(f"YAZIO data: {data['calories']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
+                logger.info(f"YAZIO: {data['calories']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
+                
+            elif response.status_code == 404:
+                # Try alternative endpoint
+                logger.info("Trying alternative YAZIO endpoint...")
+                response2 = await client.get(
+                    f"{YAZIO_API_URL}/v5/user/day/{date_str}",
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Accept": "application/json",
+                    }
+                )
+                if response2.status_code == 200:
+                    day_data = response2.json()
+                    # Parse v5 format (might be different)
+                    logger.info(f"YAZIO v5 data: {day_data}")
+                else:
+                    logger.error(f"YAZIO v5 also failed: {response2.status_code}")
+                    return {"error": f"YAZIO API error: {response2.status_code}"}
             else:
                 logger.error(f"YAZIO fetch failed: {response.status_code} - {response.text}")
                 return {"error": f"YAZIO API error: {response.status_code}"}
@@ -298,7 +364,7 @@ async def fetch_yazio_data(target_date: date) -> dict:
         return data
         
     except Exception as e:
-        logger.error(f"Error fetching YAZIO data: {e}")
+        logger.error(f"Error fetching YAZIO data: {type(e).__name__}: {e}")
         return {"error": str(e)}
 
 # ============================================
@@ -311,8 +377,12 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "1.0.0",
-        "timestamp": datetime.now().isoformat()
+        "version": "3.0.0",
+        "timestamp": datetime.now().isoformat(),
+        "config": {
+            "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
+            "yazio_credentials_set": bool(YAZIO_EMAIL and YAZIO_PASSWORD),
+        }
     }
 
 
@@ -323,7 +393,6 @@ async def sync_health_data(date_str: Optional[str] = None):
     
     - **date_str**: Optional date in YYYY-MM-DD format. Defaults to today.
     """
-    # Parse date
     if date_str:
         try:
             target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
@@ -333,6 +402,7 @@ async def sync_health_data(date_str: Optional[str] = None):
         target_date = date.today()
     
     errors = []
+    sources = []
     
     # Initialize response
     health_data = HealthData(
@@ -350,6 +420,7 @@ async def sync_health_data(date_str: Optional[str] = None):
         health_data.sleepDuration = garmin_data.get("sleepDuration", "0h 00")
         health_data.weight = garmin_data.get("weight", 0.0)
         health_data.weightChange = garmin_data.get("weightChange", 0.0)
+        sources.append("garmin")
     
     # Fetch YAZIO data
     yazio_data = await fetch_yazio_data(target_date)
@@ -364,8 +435,10 @@ async def sync_health_data(date_str: Optional[str] = None):
         health_data.carbsGoal = yazio_data.get("carbsGoal", 250)
         health_data.fat = yazio_data.get("fat", 0)
         health_data.fatGoal = yazio_data.get("fatGoal", 70)
+        sources.append("yazio")
     
     health_data.errors = errors
+    health_data.sources = sources
     
     return health_data
 
@@ -396,6 +469,50 @@ async def yazio_only(date_str: Optional[str] = None):
         target_date = date.today()
     
     return await fetch_yazio_data(target_date)
+
+
+@app.get("/test")
+async def test_connections():
+    """Test both connections and return debug info"""
+    result = {
+        "garmin": {
+            "token_configured": bool(GARMIN_OAUTH_TOKEN),
+            "status": "unknown",
+            "user": None,
+            "error": None
+        },
+        "yazio": {
+            "credentials_configured": bool(YAZIO_EMAIL and YAZIO_PASSWORD),
+            "status": "unknown",
+            "error": None
+        }
+    }
+    
+    # Test Garmin
+    try:
+        client = get_garmin_client()
+        if client:
+            result["garmin"]["status"] = "connected"
+            result["garmin"]["user"] = client.get_full_name()
+        else:
+            result["garmin"]["status"] = "not_configured"
+    except Exception as e:
+        result["garmin"]["status"] = "error"
+        result["garmin"]["error"] = f"{type(e).__name__}: {str(e)}"
+    
+    # Test YAZIO
+    try:
+        token = await yazio_login()
+        if token:
+            result["yazio"]["status"] = "connected"
+            result["yazio"]["token_preview"] = token[:20] + "..."
+        else:
+            result["yazio"]["status"] = "login_failed"
+    except Exception as e:
+        result["yazio"]["status"] = "error"
+        result["yazio"]["error"] = f"{type(e).__name__}: {str(e)}"
+    
+    return result
 
 
 # ============================================
