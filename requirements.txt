@@ -1,6 +1,5 @@
 fastapi==0.109.0
 uvicorn==0.27.0
 httpx==0.26.0
-garminconnect==0.2.25
+garminconnect==0.2.19
 pydantic==2.5.3
-python-dotenv==1.0.0
