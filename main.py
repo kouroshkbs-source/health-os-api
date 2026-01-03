@@ -112,15 +112,18 @@ def get_garmin_client():
         
         # Create a temporary directory to store the token files
         temp_dir = tempfile.mkdtemp()
-        token_file = os.path.join(temp_dir, "oauth2_token.json")
         
-        with open(token_file, 'w') as f:
-            json.dump(token_data, f)
-        
-        # Also create oauth1_token.json (can be empty)
+        # Write oauth1_token.json with actual oauth1 data
         oauth1_file = os.path.join(temp_dir, "oauth1_token.json")
+        oauth1_data = token_data.get("oauth1_token", {})
         with open(oauth1_file, 'w') as f:
-            json.dump({}, f)
+            json.dump(oauth1_data, f)
+        
+        # Write oauth2_token.json with actual oauth2 data
+        oauth2_file = os.path.join(temp_dir, "oauth2_token.json")
+        oauth2_data = token_data.get("oauth2_token", {})
+        with open(oauth2_file, 'w') as f:
+            json.dump(oauth2_data, f)
         
         # Initialize client WITHOUT credentials
         client = Garmin()
