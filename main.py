@@ -131,47 +131,45 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
-        # SOFT INITIALIZATION: Try to verify tokens and get user info
+        # Tokens are loaded, now we need to fetch the profile manually
+        # because garth.profile is None when restoring from saved tokens
         try:
-            logger.info("Verifying session via garth profile...")
+            logger.info("Tokens loaded, fetching user profile...")
+            logger.info(f"oauth1_token exists: {client.garth.oauth1_token is not None}")
+            logger.info(f"oauth2_token exists: {client.garth.oauth2_token is not None}")
             
-            # Debug: Check what garth has
-            logger.info(f"garth.oauth1_token exists: {client.garth.oauth1_token is not None}")
-            logger.info(f"garth.oauth2_token exists: {client.garth.oauth2_token is not None}")
+            # Make a direct API call to get the profile
+            # This will also validate that our tokens work
+            profile_response = client.garth.connectapi("/userprofile-service/socialProfile")
+            logger.info(f"Profile API response: {profile_response}")
             
-            # Try to get profile
-            user_profile = client.garth.profile
-            logger.info(f"Profile response: {user_profile}")
-            
-            if user_profile:
-                # Manually inject display_name and full_name
-                client.display_name = user_profile.get('displayName', user_profile.get('userName', 'Unknown'))
-                client.full_name = user_profile.get('fullName', '')
+            if profile_response:
+                client.display_name = profile_response.get('displayName', profile_response.get('userName', 'User'))
+                client.full_name = profile_response.get('fullName', '')
                 logger.info(f"Session restored for: {client.display_name}")
             else:
-                # Profile is None/empty - try alternative method
-                logger.warning("Profile is empty, trying direct API call...")
-                
-                # Try to get user settings directly
-                try:
-                    settings = client.garth.connectapi("/userprofile-service/socialProfile")
-                    logger.info(f"Social profile response: {settings}")
-                    if settings:
-                        client.display_name = settings.get('displayName', 'User')
-                        client.full_name = settings.get('fullName', '')
-                        logger.info(f"Session restored via social profile: {client.display_name}")
-                    else:
-                        raise Exception("Could not retrieve user profile")
-                except Exception as api_error:
-                    logger.error(f"Direct API call failed: {api_error}")
-                    raise
+                # Try alternative endpoint
+                logger.warning("socialProfile empty, trying userprofile...")
+                profile_response = client.garth.connectapi("/userprofile-service/userprofile")
+                logger.info(f"Userprofile API response: {profile_response}")
+                if profile_response:
+                    client.display_name = profile_response.get('displayName', profile_response.get('userName', 'User'))
+                    client.full_name = profile_response.get('fullName', '')
+                    logger.info(f"Session restored for: {client.display_name}")
+                else:
+                    # Last resort: just set a placeholder and try to fetch data anyway
+                    logger.warning("Could not get profile, using placeholder...")
+                    client.display_name = "User"
+                    client.full_name = ""
             
         except Exception as profile_error:
-            # Log full error details
             import traceback
-            logger.error(f"Token validation failed: {type(profile_error).__name__}: {profile_error}")
+            logger.error(f"Profile fetch failed: {type(profile_error).__name__}: {profile_error}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
+            # Don't return None yet - maybe we can still fetch data
+            logger.warning("Setting placeholder display_name and continuing...")
+            client.display_name = "User"
+            client.full_name = ""
         
         garmin_client = client
         return client
