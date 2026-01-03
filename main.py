@@ -46,6 +46,8 @@ app.add_middleware(
 
 # Garmin OAuth token (JSON string from local auth script)
 GARMIN_OAUTH_TOKEN = os.getenv("GARMIN_OAUTH_TOKEN")
+# Garmin Display Name (bypass for server environments where profile API returns empty)
+GARMIN_DISPLAY_NAME = os.getenv("GARMIN_DISPLAY_NAME")
 
 # YAZIO credentials
 YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
@@ -131,53 +133,43 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
-        # CRITICAL: We must get the displayName for API calls to work
-        # Without it, URLs are malformed and return empty lists []
-        try:
-            logger.info("Fetching user profile via user-settings endpoint...")
-            logger.info(f"oauth1_token exists: {client.garth.oauth1_token is not None}")
-            logger.info(f"oauth2_token exists: {client.garth.oauth2_token is not None}")
-            
-            # Call the modern endpoint that always contains the profile
-            user_settings = client.garth.connectapi(
-                "/userprofile-service/userprofile/user-settings"
-            )
-            logger.info(f"user-settings response: {user_settings}")
-            
-            # Extract displayName (the key piece!)
-            display_name = None
-            if user_settings:
-                if isinstance(user_settings, dict):
+        logger.info(f"oauth1_token exists: {client.garth.oauth1_token is not None}")
+        logger.info(f"oauth2_token exists: {client.garth.oauth2_token is not None}")
+        
+        # BYPASS MODE: If GARMIN_DISPLAY_NAME is set, skip API profile fetch
+        # This is needed because Garmin API returns [] for profile on server IPs
+        if GARMIN_DISPLAY_NAME:
+            logger.info(f"Using GARMIN_DISPLAY_NAME bypass: {GARMIN_DISPLAY_NAME}")
+            client.display_name = GARMIN_DISPLAY_NAME
+            client.full_name = GARMIN_DISPLAY_NAME
+            logger.info(f"Client ready with forced display_name: {client.display_name}")
+        else:
+            # Try to fetch profile from API (may fail on server environments)
+            try:
+                logger.info("No GARMIN_DISPLAY_NAME set, trying API...")
+                user_settings = client.garth.connectapi(
+                    "/userprofile-service/userprofile/user-settings"
+                )
+                logger.info(f"user-settings response: {user_settings}")
+                
+                display_name = None
+                if user_settings and isinstance(user_settings, dict):
                     if 'userData' in user_settings:
                         display_name = user_settings['userData'].get('displayName')
-                        full_name = user_settings['userData'].get('fullName', '')
                     else:
                         display_name = user_settings.get('displayName')
-                        full_name = user_settings.get('fullName', '')
-            
-            if not display_name:
-                # Try alternative endpoint
-                logger.warning("displayName not found in user-settings, trying social profile...")
-                social = client.garth.connectapi("/userprofile-service/socialProfile")
-                logger.info(f"socialProfile response: {social}")
-                if social and isinstance(social, dict):
-                    display_name = social.get('displayName') or social.get('userName')
-                    full_name = social.get('fullName', '')
-            
-            if not display_name:
-                raise Exception("Could not retrieve displayName from any endpoint")
-            
-            # INJECT INTO CLIENT (the missing step!)
-            client.display_name = display_name
-            client.full_name = full_name if full_name else display_name
-            
-            logger.info(f"Session active for user: {client.display_name}")
-            
-        except Exception as profile_error:
-            import traceback
-            logger.error(f"Profile fetch failed: {type(profile_error).__name__}: {profile_error}")
-            logger.error(f"Traceback: {traceback.format_exc()}")
-            return None
+                
+                if not display_name:
+                    raise Exception("Could not get displayName - set GARMIN_DISPLAY_NAME env var")
+                
+                client.display_name = display_name
+                client.full_name = display_name
+                logger.info(f"Session active for: {client.display_name}")
+                
+            except Exception as profile_error:
+                logger.error(f"Profile fetch failed: {profile_error}")
+                logger.error("Set GARMIN_DISPLAY_NAME environment variable to bypass")
+                return None
         
         garmin_client = client
         return client
