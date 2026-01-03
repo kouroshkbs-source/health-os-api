@@ -1,7 +1,7 @@
 """
 Health OS API v3 - Complete version
 - Garmin: Token-based authentication (generate tokens locally first)
-- YAZIO: OAuth v15 for auth + GraphQL for data
+- YAZIO: OAuth v15 for auth + REST /users/me/diary for data
 
 Deploy on Railway
 """
@@ -51,9 +51,8 @@ YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
 YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 
 # YAZIO Client credentials
-# Auth is on v15 REST, Data uses GraphQL endpoint
-YAZIO_AUTH_URL = "https://yzapi.yazio.com/v15"
-YAZIO_GRAPHQL_URL = "https://yzapi.yazio.com/graphql"
+# Auth and Data both on yzapi.yazio.com/v15
+YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
 YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
 YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
 
@@ -230,7 +229,7 @@ def fetch_garmin_data(target_date: date) -> dict:
         return {"error": str(e)}
 
 # ============================================
-# YAZIO FUNCTIONS (Auth REST v15, Data GraphQL)
+# YAZIO FUNCTIONS (REST API)
 # ============================================
 
 async def yazio_login() -> Optional[str]:
@@ -261,9 +260,9 @@ async def yazio_login() -> Optional[str]:
         }
         
         async with httpx.AsyncClient() as client:
-            # Auth uses v15 endpoint on yzapi.yazio.com
+            # Auth on v15 endpoint
             response = await client.post(
-                f"{YAZIO_AUTH_URL}/oauth/token",
+                f"{YAZIO_BASE_URL}/oauth/token",
                 json=payload,
                 headers={
                     "Content-Type": "application/json",
@@ -290,7 +289,7 @@ async def yazio_login() -> Optional[str]:
 
 
 async def fetch_yazio_data(target_date: date) -> dict:
-    """Fetch nutrition data from YAZIO using GraphQL API"""
+    """Fetch nutrition data from YAZIO using REST API with /users/me/diary"""
     token = await yazio_login()
     
     if token is None:
@@ -309,97 +308,91 @@ async def fetch_yazio_data(target_date: date) -> dict:
     
     date_str = target_date.strftime("%Y-%m-%d")
     
-    # GraphQL query for nutrition summary
-    query = """
-    query GetDiary($date: Date!) {
-      me {
-        diary(date: $date) {
-          date
-          nutritionSummary {
-            calories {
-              goal
-              current
-            }
-            carbohydrates {
-              goal
-              current
-            }
-            protein {
-              goal
-              current
-            }
-            fat {
-              goal
-              current
-            }
-          }
-        }
-      }
-    }
-    """
-    
-    payload = {
-        "query": query,
-        "variables": {
-            "date": date_str
-        }
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)",
     }
     
     try:
         async with httpx.AsyncClient() as client:
-            # Use GraphQL endpoint
-            response = await client.post(
-                YAZIO_GRAPHQL_URL,
-                json=payload,
-                headers={
-                    "Authorization": f"Bearer {token}",
-                    "Content-Type": "application/json",
-                    "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)",
-                }
-            )
+            # Try /users/me/diary endpoint
+            url = f"{YAZIO_BASE_URL}/users/me/diary?date={date_str}"
+            logger.info(f"Trying YAZIO endpoint: {url}")
             
-            logger.info(f"YAZIO GraphQL response status: {response.status_code}")
+            response = await client.get(url, headers=headers)
+            logger.info(f"YAZIO diary response status: {response.status_code}")
+            
+            # If 404, try alternative endpoints
+            if response.status_code == 404:
+                logger.info("Trying alternative endpoint: /user/diary")
+                url = f"{YAZIO_BASE_URL}/user/diary?date={date_str}"
+                response = await client.get(url, headers=headers)
+                logger.info(f"YAZIO /user/diary response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                logger.info("Trying alternative endpoint: /diary")
+                url = f"{YAZIO_BASE_URL}/diary?date={date_str}"
+                response = await client.get(url, headers=headers)
+                logger.info(f"YAZIO /diary response status: {response.status_code}")
+            
+            if response.status_code == 404:
+                logger.info("Trying alternative endpoint: /me/diary")
+                url = f"{YAZIO_BASE_URL}/me/diary?date={date_str}"
+                response = await client.get(url, headers=headers)
+                logger.info(f"YAZIO /me/diary response status: {response.status_code}")
             
             if response.status_code == 200:
-                result = response.json()
-                logger.info(f"YAZIO GraphQL response: {result}")
+                day_data = response.json()
+                logger.info(f"YAZIO response keys: {list(day_data.keys()) if isinstance(day_data, dict) else type(day_data)}")
+                logger.info(f"YAZIO raw response: {day_data}")
                 
-                # Check for GraphQL errors
-                if "errors" in result:
-                    logger.error(f"YAZIO GraphQL errors: {result['errors']}")
-                    return {"error": f"GraphQL error: {result['errors'][0].get('message', 'Unknown')}"}
+                # Parse response - try multiple possible structures
+                if isinstance(day_data, dict):
+                    # Structure 1: nutrition_daily
+                    nutrition = day_data.get("nutrition_daily", {}) or day_data.get("nutritionDaily", {})
+                    if nutrition:
+                        data["calories"] = int(nutrition.get("calories", 0) or nutrition.get("energy", 0) or 0)
+                        data["protein"] = int(nutrition.get("protein", 0) or nutrition.get("proteins", 0) or 0)
+                        data["carbs"] = int(nutrition.get("carbohydrates", 0) or nutrition.get("carbs", 0) or 0)
+                        data["fat"] = int(nutrition.get("fat", 0) or 0)
+                    
+                    # Structure 2: consumed
+                    consumed = day_data.get("consumed", {})
+                    if consumed and data["calories"] == 0:
+                        data["calories"] = int(consumed.get("energy_kcal", 0) or consumed.get("calories", 0) or 0)
+                        data["protein"] = int(consumed.get("proteins", 0) or consumed.get("protein", 0) or 0)
+                        data["carbs"] = int(consumed.get("carbohydrates", 0) or consumed.get("carbs", 0) or 0)
+                        data["fat"] = int(consumed.get("fat", 0) or 0)
+                    
+                    # Structure 3: summary
+                    summary = day_data.get("summary", {}) or day_data.get("nutritionSummary", {})
+                    if summary and data["calories"] == 0:
+                        data["calories"] = int(summary.get("calories", 0) or summary.get("energy", 0) or 0)
+                        data["protein"] = int(summary.get("protein", 0) or 0)
+                        data["carbs"] = int(summary.get("carbohydrates", 0) or summary.get("carbs", 0) or 0)
+                        data["fat"] = int(summary.get("fat", 0) or 0)
+                    
+                    # Structure 4: direct values
+                    if data["calories"] == 0:
+                        data["calories"] = int(day_data.get("calories", 0) or day_data.get("energy_kcal", 0) or 0)
+                        data["protein"] = int(day_data.get("protein", 0) or day_data.get("proteins", 0) or 0)
+                        data["carbs"] = int(day_data.get("carbohydrates", 0) or day_data.get("carbs", 0) or 0)
+                        data["fat"] = int(day_data.get("fat", 0) or 0)
+                    
+                    # Extract goals if available
+                    goal = day_data.get("goal", {}) or day_data.get("nutrition_goal", {}) or day_data.get("nutritionGoal", {})
+                    if goal:
+                        data["caloriesGoal"] = int(goal.get("calories", 2000) or goal.get("energy_kcal", 2000) or 2000)
+                        data["proteinGoal"] = int(goal.get("protein", 150) or goal.get("proteins", 150) or 150)
+                        data["carbsGoal"] = int(goal.get("carbohydrates", 250) or goal.get("carbs", 250) or 250)
+                        data["fatGoal"] = int(goal.get("fat", 70) or 70)
                 
-                # Extract data from GraphQL response
-                diary = result.get("data", {}).get("me", {}).get("diary", {})
-                if diary:
-                    summary = diary.get("nutritionSummary", {})
-                    
-                    # Calories
-                    cal = summary.get("calories", {})
-                    data["calories"] = int(cal.get("current", 0) or 0)
-                    data["caloriesGoal"] = int(cal.get("goal", 2000) or 2000)
-                    
-                    # Protein
-                    prot = summary.get("protein", {})
-                    data["protein"] = int(prot.get("current", 0) or 0)
-                    data["proteinGoal"] = int(prot.get("goal", 150) or 150)
-                    
-                    # Carbs
-                    carb = summary.get("carbohydrates", {})
-                    data["carbs"] = int(carb.get("current", 0) or 0)
-                    data["carbsGoal"] = int(carb.get("goal", 250) or 250)
-                    
-                    # Fat
-                    fat = summary.get("fat", {})
-                    data["fat"] = int(fat.get("current", 0) or 0)
-                    data["fatGoal"] = int(fat.get("goal", 70) or 70)
-                    
-                    logger.info(f"YAZIO: {data['calories']}/{data['caloriesGoal']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
-                else:
-                    logger.warning("No diary data in GraphQL response")
+                logger.info(f"YAZIO: {data['calories']}/{data['caloriesGoal']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
                 
             else:
-                logger.error(f"YAZIO GraphQL failed: {response.status_code} - {response.text}")
+                error_text = response.text[:200] if response.text else "No response body"
+                logger.error(f"YAZIO fetch failed: {response.status_code} - {error_text}")
                 return {"error": f"YAZIO API error: {response.status_code}"}
                 
         return data
