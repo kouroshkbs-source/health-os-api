@@ -131,45 +131,53 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
-        # Tokens are loaded, now we need to fetch the profile manually
-        # because garth.profile is None when restoring from saved tokens
+        # CRITICAL: We must get the displayName for API calls to work
+        # Without it, URLs are malformed and return empty lists []
         try:
-            logger.info("Tokens loaded, fetching user profile...")
+            logger.info("Fetching user profile via user-settings endpoint...")
             logger.info(f"oauth1_token exists: {client.garth.oauth1_token is not None}")
             logger.info(f"oauth2_token exists: {client.garth.oauth2_token is not None}")
             
-            # Make a direct API call to get the profile
-            # This will also validate that our tokens work
-            profile_response = client.garth.connectapi("/userprofile-service/socialProfile")
-            logger.info(f"Profile API response: {profile_response}")
+            # Call the modern endpoint that always contains the profile
+            user_settings = client.garth.connectapi(
+                "/userprofile-service/userprofile/user-settings"
+            )
+            logger.info(f"user-settings response: {user_settings}")
             
-            if profile_response:
-                client.display_name = profile_response.get('displayName', profile_response.get('userName', 'User'))
-                client.full_name = profile_response.get('fullName', '')
-                logger.info(f"Session restored for: {client.display_name}")
-            else:
+            # Extract displayName (the key piece!)
+            display_name = None
+            if user_settings:
+                if isinstance(user_settings, dict):
+                    if 'userData' in user_settings:
+                        display_name = user_settings['userData'].get('displayName')
+                        full_name = user_settings['userData'].get('fullName', '')
+                    else:
+                        display_name = user_settings.get('displayName')
+                        full_name = user_settings.get('fullName', '')
+            
+            if not display_name:
                 # Try alternative endpoint
-                logger.warning("socialProfile empty, trying userprofile...")
-                profile_response = client.garth.connectapi("/userprofile-service/userprofile")
-                logger.info(f"Userprofile API response: {profile_response}")
-                if profile_response:
-                    client.display_name = profile_response.get('displayName', profile_response.get('userName', 'User'))
-                    client.full_name = profile_response.get('fullName', '')
-                    logger.info(f"Session restored for: {client.display_name}")
-                else:
-                    # Last resort: just set a placeholder and try to fetch data anyway
-                    logger.warning("Could not get profile, using placeholder...")
-                    client.display_name = "User"
-                    client.full_name = ""
+                logger.warning("displayName not found in user-settings, trying social profile...")
+                social = client.garth.connectapi("/userprofile-service/socialProfile")
+                logger.info(f"socialProfile response: {social}")
+                if social and isinstance(social, dict):
+                    display_name = social.get('displayName') or social.get('userName')
+                    full_name = social.get('fullName', '')
+            
+            if not display_name:
+                raise Exception("Could not retrieve displayName from any endpoint")
+            
+            # INJECT INTO CLIENT (the missing step!)
+            client.display_name = display_name
+            client.full_name = full_name if full_name else display_name
+            
+            logger.info(f"Session active for user: {client.display_name}")
             
         except Exception as profile_error:
             import traceback
             logger.error(f"Profile fetch failed: {type(profile_error).__name__}: {profile_error}")
             logger.error(f"Traceback: {traceback.format_exc()}")
-            # Don't return None yet - maybe we can still fetch data
-            logger.warning("Setting placeholder display_name and continuing...")
-            client.display_name = "User"
-            client.full_name = ""
+            return None
         
         garmin_client = client
         return client
