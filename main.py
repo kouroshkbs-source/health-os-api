@@ -131,10 +131,12 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
+        # CRITICAL: Must call login() to initialize the session
+        # This validates tokens and fetches user profile (display_name)
+        client.login()
+        
         # Verify the session works
-        logger.info("Verifying Garmin session...")
-        name = client.get_full_name()
-        logger.info(f"Garmin connected as: {name}")
+        logger.info(f"Garmin connected as: {client.display_name}")
         
         garmin_client = client
         return client
@@ -164,11 +166,13 @@ def fetch_garmin_data(target_date: date) -> dict:
     }
     
     date_str = target_date.strftime("%Y-%m-%d")
+    logger.info(f"Fetching Garmin data for date: {date_str}")
     
     try:
         # Body Battery
         try:
             bb_data = client.get_body_battery(date_str)
+            logger.info(f"Garmin Body Battery raw response: {bb_data}")
             if bb_data:
                 if isinstance(bb_data, list) and len(bb_data) > 0:
                     max_bb = 0
@@ -187,8 +191,10 @@ def fetch_garmin_data(target_date: date) -> dict:
         # Sleep data
         try:
             sleep_data = client.get_sleep_data(date_str)
+            logger.info(f"Garmin Sleep raw response keys: {sleep_data.keys() if isinstance(sleep_data, dict) else type(sleep_data)}")
             if sleep_data:
                 daily_sleep = sleep_data.get("dailySleepDTO", {})
+                logger.info(f"Garmin dailySleepDTO: {daily_sleep}")
                 
                 # Sleep score
                 sleep_scores = daily_sleep.get("sleepScores", {})
@@ -210,6 +216,7 @@ def fetch_garmin_data(target_date: date) -> dict:
         try:
             start_date = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
             weight_data = client.get_body_composition(start_date, date_str)
+            logger.info(f"Garmin Weight raw response: {weight_data}")
             
             if weight_data:
                 weights = weight_data.get("dateWeightList", []) or weight_data.get("weightList", [])
@@ -417,15 +424,15 @@ async def root():
 
 
 @app.get("/sync", response_model=HealthData)
-async def sync_health_data(date_str: Optional[str] = None):
+async def sync_health_data(date: Optional[str] = None):
     """
     Fetch and aggregate health data from all sources.
     
-    - **date_str**: Optional date in YYYY-MM-DD format. Defaults to today.
+    - **date**: Optional date in YYYY-MM-DD format. Defaults to today.
     """
-    if date_str:
+    if date:
         try:
-            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
+            target_date = datetime.strptime(date, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     else:
