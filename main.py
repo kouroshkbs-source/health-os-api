@@ -131,12 +131,22 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
-        # CRITICAL: Must call login() to initialize the session
-        # This validates tokens and fetches user profile (display_name)
-        client.login()
-        
-        # Verify the session works
-        logger.info(f"Garmin connected as: {client.display_name}")
+        # SOFT INITIALIZATION: Instead of client.login() which can fail on datacenter IPs,
+        # we manually verify and inject the user profile
+        try:
+            logger.info("Verifying session via garth profile...")
+            user_profile = client.garth.profile
+            
+            # Manually inject display_name and full_name
+            client.display_name = user_profile.get('displayName', user_profile.get('userName', 'Unknown'))
+            client.full_name = user_profile.get('fullName', '')
+            
+            logger.info(f"Session restored for: {client.display_name}")
+            
+        except Exception as profile_error:
+            # If this fails, tokens are invalid or IP is blocked
+            logger.error(f"Token validation failed (IP Block?): {profile_error}")
+            return None
         
         garmin_client = client
         return client
