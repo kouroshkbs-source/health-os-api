@@ -736,7 +736,7 @@ async def debug_consumed_items(date_str: Optional[str] = None):
                         if isinstance(json_response, list) and len(json_response) > 0:
                             has_items = True
                         elif isinstance(json_response, dict):
-                            for key in ["items", "consumed_items", "foods", "entries"]:
+                            for key in ["items", "consumed_items", "foods", "entries", "products"]:
                                 if key in json_response:
                                     has_items = True
                                     break
@@ -757,6 +757,40 @@ async def debug_consumed_items(date_str: Optional[str] = None):
                 results[url] = {"error": str(e)}
     
     return {"date": date_str, "results": results}
+
+
+@app.get("/debug-product")
+async def debug_product(product_id: str):
+    """Test fetching individual product details (name, macros, etc.)"""
+    token = await yazio_login()
+    if not token:
+        return {"error": "Could not get YAZIO token"}
+    
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
+    # Try different possible endpoints for product details
+    endpoints_to_try = [
+        f"{YAZIO_BASE_URL}/products/{product_id}",
+        f"{YAZIO_BASE_URL}/user/products/{product_id}",
+        f"https://yzapi.yazio.com/v7/products/{product_id}",
+        f"https://yzapi.yazio.com/v8/products/{product_id}",
+        f"https://yzapi.yazio.com/v10/products/{product_id}",
+        f"https://yzapi.yazio.com/v12/products/{product_id}",
+    ]
+    
+    results = {}
+    async with httpx.AsyncClient() as client:
+        for url in endpoints_to_try:
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 200:
+                    results[url] = {"status": 200, "response": response.json()}
+                else:
+                    results[url] = {"status": response.status_code, "response": response.text[:300]}
+            except Exception as e:
+                results[url] = {"error": str(e)}
+    
+    return {"product_id": product_id, "results": results}
 
 
 # ============================================
