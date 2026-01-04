@@ -739,19 +739,3 @@ if __name__ == "__main__":
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
 ```
-
----
-
-**Après avoir collé ce code sur GitHub :**
-
-1. Attends le redéploiement Railway (~1-2 min)
-2. Ouvre ces 2 URLs :
-
-**Test GraphQL (aliments individuels) :**
-```
-https://web-production-8be9.up.railway.app/test-graphql?date_str=2026-01-04
-```
-
-**Debug meals (structure actuelle) :**
-```
-https://web-production-8be9.up.railway.app/debug-meals?date_str=2026-01-04
