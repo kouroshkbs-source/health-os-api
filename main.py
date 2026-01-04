@@ -794,6 +794,165 @@ async def debug_product(product_id: str):
 
 
 # ============================================
+# FOOD ITEMS ENDPOINT (for Notion sync)
+# ============================================
+
+@app.get("/food-items")
+async def get_food_items(date_str: Optional[str] = None):
+    """
+    Get all consumed food items with calculated macros.
+    Combines /user/consumed-items + /products/{id} to return complete food data.
+    
+    Returns:
+        - List of foods with name, meal, amount, calculated macros
+        - Ready for N8N sync to Notion
+    """
+    if date_str is None:
+        date_str = date.today().isoformat()
+    
+    # Validate date format
+    try:
+        datetime.strptime(date_str, "%Y-%m-%d")
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
+    
+    token = await yazio_login()
+    if not token:
+        return {"error": "Could not get YAZIO token"}
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json"
+    }
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        
+        # 1. Get list of consumed items
+        consumed_url = f"{YAZIO_BASE_URL}/user/consumed-items?date={date_str}"
+        
+        try:
+            consumed_resp = await client.get(consumed_url, headers=headers)
+            consumed_resp.raise_for_status()
+            consumed_data = consumed_resp.json()
+        except Exception as e:
+            logger.error(f"Failed to fetch consumed-items: {e}")
+            return {"error": f"Failed to fetch consumed-items: {str(e)}"}
+        
+        # Extract products list
+        products_list = consumed_data.get("products", [])
+        
+        if not products_list:
+            return {
+                "date": date_str,
+                "count": 0,
+                "items": [],
+                "totals": {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+            }
+        
+        # 2. For each item, fetch product details and calculate macros
+        items = []
+        totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+        
+        for consumed in products_list:
+            product_id = consumed.get("product_id")
+            
+            if not product_id:
+                continue
+            
+            # Fetch product details
+            product_url = f"{YAZIO_BASE_URL}/products/{product_id}"
+            
+            try:
+                product_resp = await client.get(product_url, headers=headers)
+                product_resp.raise_for_status()
+                product_data = product_resp.json()
+            except Exception as e:
+                logger.warning(f"Failed to fetch product {product_id}: {e}")
+                items.append({
+                    "yazio_id": consumed.get("id"),
+                    "product_id": product_id,
+                    "error": f"Could not fetch product: {str(e)}"
+                })
+                continue
+            
+            # 3. Extract data
+            amount = consumed.get("amount", 0)  # Already in grams
+            serving = consumed.get("serving", "gram")
+            serving_quantity = consumed.get("serving_quantity", amount)
+            
+            nutrients = product_data.get("nutrients", {})
+            
+            # Macros per gram (decimal values)
+            energy_per_g = nutrients.get("energy.energy", 0) or 0
+            protein_per_g = nutrients.get("nutrient.protein", 0) or 0
+            carbs_per_g = nutrients.get("nutrient.carb", 0) or 0
+            fat_per_g = nutrients.get("nutrient.fat", 0) or 0
+            
+            # 4. Calculate actual macros
+            calories = round(energy_per_g * amount, 1)
+            protein = round(protein_per_g * amount, 2)
+            carbs = round(carbs_per_g * amount, 2)
+            fat = round(fat_per_g * amount, 2)
+            
+            # 5. Build reference string
+            if serving == "gram":
+                reference = f"{int(amount)}g"
+            else:
+                if serving_quantity == int(serving_quantity):
+                    qty_str = str(int(serving_quantity))
+                else:
+                    qty_str = str(serving_quantity)
+                reference = f"{qty_str} {serving.capitalize()} ({int(amount)}g)"
+            
+            # 6. Map meal (daytime → Notion format)
+            meal_map = {
+                "breakfast": "Breakfast",
+                "lunch": "Lunch",
+                "dinner": "Diner",  # Match Notion schema spelling
+                "snack": "Snack"
+            }
+            meal = meal_map.get(consumed.get("daytime", ""), "Snack")
+            
+            # 7. Build item
+            item = {
+                "yazio_id": consumed.get("id"),
+                "product_id": product_id,
+                "name": product_data.get("name", "Unknown"),
+                "meal": meal,
+                "amount": amount,
+                "unit": "g",
+                "reference": reference,
+                "calories": calories,
+                "protein": protein,
+                "carbs": carbs,
+                "fat": fat,
+                "consumed_at": consumed.get("date"),
+                "serving_info": {
+                    "serving": serving,
+                    "serving_quantity": serving_quantity
+                }
+            }
+            
+            items.append(item)
+            
+            # Accumulate totals
+            totals["calories"] += calories
+            totals["protein"] += protein
+            totals["carbs"] += carbs
+            totals["fat"] += fat
+        
+        # Round totals
+        totals = {k: round(v, 1) for k, v in totals.items()}
+        
+        return {
+            "date": date_str,
+            "count": len(items),
+            "items": items,
+            "totals": totals
+        }
+
+
+# ============================================
 # RUN SERVER
 # ============================================
 
