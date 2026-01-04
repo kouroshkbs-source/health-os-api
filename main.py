@@ -423,8 +423,6 @@ async def fetch_yazio_data(target_date: date) -> dict:
                 if items_resp.status_code == 200:
                     items = items_resp.json()
                     logger.info(f"YAZIO consumed items: {len(items) if isinstance(items, list) else 'not a list'}")
-                    # Note: items only contain product_id and amount, not nutrients
-                    # Would need to fetch each product to get nutrients - simplified for now
                     
             else:
                 error_text = response.text[:500] if response.text else "No response body"
@@ -589,17 +587,14 @@ async def test_connections():
 async def test_graphql(date_str: Optional[str] = None):
     """
     Test YAZIO GraphQL endpoint to get individual food items.
-    This is needed to get the detailed food list (not just totals).
     """
     if date_str is None:
         date_str = date.today().isoformat()
     
-    # Get YAZIO token
     token = await yazio_login()
     if not token:
         return {"error": "Could not get YAZIO token"}
     
-    # GraphQL query for consumed items
     query = """
     query GetDiaryDetail($date: Date!) {
       me {
@@ -623,7 +618,6 @@ async def test_graphql(date_str: Optional[str] = None):
     }
     """
     
-    # Try multiple possible GraphQL endpoints
     endpoints = [
         "https://yzapi.yazio.com/graphql",
         "https://yzapi.yazio.com/v1/graphql",
@@ -637,10 +631,7 @@ async def test_graphql(date_str: Optional[str] = None):
             try:
                 response = await client.post(
                     endpoint,
-                    json={
-                        "query": query,
-                        "variables": {"date": date_str}
-                    },
+                    json={"query": query, "variables": {"date": date_str}},
                     headers={
                         "Authorization": f"Bearer {token}",
                         "Content-Type": "application/json",
@@ -654,11 +645,9 @@ async def test_graphql(date_str: Optional[str] = None):
                     "response": response.json() if response.status_code == 200 else response.text[:500]
                 }
                 
-                # If we got data, parse it
                 if response.status_code == 200:
                     data = response.json()
                     if data.get("data") and not data.get("errors"):
-                        # Parse into flat list
                         meals_data = data.get("data", {}).get("me", {}).get("diary", {}).get("meals", [])
                         flat_items = []
                         for meal in meals_data:
@@ -679,24 +668,14 @@ async def test_graphql(date_str: Optional[str] = None):
                         results[endpoint]["items_count"] = len(flat_items)
                         
             except Exception as e:
-                results[endpoint] = {
-                    "status": "error",
-                    "error": f"{type(e).__name__}: {str(e)}"
-                }
+                results[endpoint] = {"status": "error", "error": f"{type(e).__name__}: {str(e)}"}
     
-    return {
-        "date": date_str,
-        "token_preview": token[:20] + "...",
-        "endpoints_tested": results
-    }
+    return {"date": date_str, "token_preview": token[:20] + "...", "endpoints_tested": results}
 
 
 @app.get("/debug-meals")
 async def debug_meals(date_str: Optional[str] = None):
-    """
-    Debug endpoint to see the full structure of the meals response
-    from the daily-summary endpoint.
-    """
+    """Debug endpoint to see the full meals response structure."""
     if date_str is None:
         date_str = date.today().isoformat()
     
@@ -704,10 +683,7 @@ async def debug_meals(date_str: Optional[str] = None):
     if not token:
         return {"error": "Could not get YAZIO token"}
     
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Accept": "application/json",
-    }
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     
     async with httpx.AsyncClient() as client:
         response = await client.get(
@@ -724,10 +700,63 @@ async def debug_meals(date_str: Optional[str] = None):
                 "full_response": data
             }
         else:
-            return {
-                "error": f"Status {response.status_code}",
-                "response": response.text[:1000]
-            }
+            return {"error": f"Status {response.status_code}", "response": response.text[:1000]}
+
+
+@app.get("/debug-consumed-items")
+async def debug_consumed_items(date_str: Optional[str] = None):
+    """Test various endpoints for individual food items"""
+    if date_str is None:
+        date_str = date.today().isoformat()
+    
+    token = await yazio_login()
+    if not token:
+        return {"error": "Could not get YAZIO token"}
+    
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
+    endpoints_to_try = [
+        f"{YAZIO_BASE_URL}/user/consumed-items?date={date_str}",
+        f"{YAZIO_BASE_URL}/user/diary?date={date_str}",
+        f"{YAZIO_BASE_URL}/user/day?date={date_str}",
+        f"{YAZIO_BASE_URL}/user/meals?date={date_str}",
+        f"{YAZIO_BASE_URL}/user/food-diary?date={date_str}",
+        f"{YAZIO_BASE_URL}/diary?date={date_str}",
+    ]
+    
+    results = {}
+    async with httpx.AsyncClient() as client:
+        for url in endpoints_to_try:
+            try:
+                response = await client.get(url, headers=headers)
+                if response.status_code == 200:
+                    try:
+                        json_response = response.json()
+                        has_items = False
+                        if isinstance(json_response, list) and len(json_response) > 0:
+                            has_items = True
+                        elif isinstance(json_response, dict):
+                            for key in ["items", "consumed_items", "foods", "entries"]:
+                                if key in json_response:
+                                    has_items = True
+                                    break
+                        results[url] = {
+                            "status": response.status_code,
+                            "has_individual_items": has_items,
+                            "response_type": type(json_response).__name__,
+                            "response": json_response
+                        }
+                    except:
+                        results[url] = {"status": response.status_code, "response": response.text[:500]}
+                else:
+                    results[url] = {
+                        "status": response.status_code,
+                        "response": response.text[:200] if response.text else "empty"
+                    }
+            except Exception as e:
+                results[url] = {"error": str(e)}
+    
+    return {"date": date_str, "results": results}
 
 
 # ============================================
