@@ -1,4 +1,3 @@
-"""
 Health OS API v4 - Complete version with corrected YAZIO endpoints
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + REST /user/widgets/daily-summary for data
@@ -738,4 +737,3 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
-```
