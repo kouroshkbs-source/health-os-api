@@ -1,3 +1,4 @@
+"""
 Health OS API v4 - Complete version with corrected YAZIO endpoints
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + REST /user/widgets/daily-summary for data
