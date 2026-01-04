@@ -585,6 +585,151 @@ async def test_connections():
     return result
 
 
+@app.get("/test-graphql")
+async def test_graphql(date_str: Optional[str] = None):
+    """
+    Test YAZIO GraphQL endpoint to get individual food items.
+    This is needed to get the detailed food list (not just totals).
+    """
+    if date_str is None:
+        date_str = date.today().isoformat()
+    
+    # Get YAZIO token
+    token = await yazio_login()
+    if not token:
+        return {"error": "Could not get YAZIO token"}
+    
+    # GraphQL query for consumed items
+    query = """
+    query GetDiaryDetail($date: Date!) {
+      me {
+        diary(date: $date) {
+          meals {
+            name
+            consumedItems {
+              name
+              amount
+              unit
+              nutritionSummary {
+                calories { current }
+                protein { current }
+                carbohydrates { current }
+                fat { current }
+              }
+            }
+          }
+        }
+      }
+    }
+    """
+    
+    # Try multiple possible GraphQL endpoints
+    endpoints = [
+        "https://yzapi.yazio.com/graphql",
+        "https://yzapi.yazio.com/v1/graphql",
+        "https://live.yazio.com/graphql",
+    ]
+    
+    results = {}
+    
+    async with httpx.AsyncClient() as client:
+        for endpoint in endpoints:
+            try:
+                response = await client.post(
+                    endpoint,
+                    json={
+                        "query": query,
+                        "variables": {"date": date_str}
+                    },
+                    headers={
+                        "Authorization": f"Bearer {token}",
+                        "Content-Type": "application/json",
+                        "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)"
+                    },
+                    timeout=10
+                )
+                
+                results[endpoint] = {
+                    "status": response.status_code,
+                    "response": response.json() if response.status_code == 200 else response.text[:500]
+                }
+                
+                # If we got data, parse it
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("data") and not data.get("errors"):
+                        # Parse into flat list
+                        meals_data = data.get("data", {}).get("me", {}).get("diary", {}).get("meals", [])
+                        flat_items = []
+                        for meal in meals_data:
+                            meal_name = meal.get("name", "Unknown")
+                            for item in meal.get("consumedItems", []):
+                                macros = item.get("nutritionSummary", {})
+                                flat_items.append({
+                                    "name": item.get("name", "Unknown"),
+                                    "meal_type": meal_name,
+                                    "amount": item.get("amount", 0),
+                                    "unit": item.get("unit", ""),
+                                    "calories": macros.get("calories", {}).get("current", 0),
+                                    "protein": macros.get("protein", {}).get("current", 0),
+                                    "carbs": macros.get("carbohydrates", {}).get("current", 0),
+                                    "fat": macros.get("fat", {}).get("current", 0)
+                                })
+                        results[endpoint]["parsed_items"] = flat_items
+                        results[endpoint]["items_count"] = len(flat_items)
+                        
+            except Exception as e:
+                results[endpoint] = {
+                    "status": "error",
+                    "error": f"{type(e).__name__}: {str(e)}"
+                }
+    
+    return {
+        "date": date_str,
+        "token_preview": token[:20] + "...",
+        "endpoints_tested": results
+    }
+
+
+@app.get("/debug-meals")
+async def debug_meals(date_str: Optional[str] = None):
+    """
+    Debug endpoint to see the full structure of the meals response
+    from the daily-summary endpoint.
+    """
+    if date_str is None:
+        date_str = date.today().isoformat()
+    
+    token = await yazio_login()
+    if not token:
+        return {"error": "Could not get YAZIO token"}
+    
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(
+            f"{YAZIO_BASE_URL}/user/widgets/daily-summary?date={date_str}",
+            headers=headers
+        )
+        
+        if response.status_code == 200:
+            data = response.json()
+            return {
+                "date": date_str,
+                "top_level_keys": list(data.keys()) if isinstance(data, dict) else type(data).__name__,
+                "meals_structure": data.get("meals", "NOT FOUND"),
+                "full_response": data
+            }
+        else:
+            return {
+                "error": f"Status {response.status_code}",
+                "response": response.text[:1000]
+            }
+
+
 # ============================================
 # RUN SERVER
 # ============================================
@@ -593,3 +738,20 @@ if __name__ == "__main__":
     import uvicorn
     port = int(os.getenv("PORT", 8000))
     uvicorn.run(app, host="0.0.0.0", port=port)
+```
+
+---
+
+**Après avoir collé ce code sur GitHub :**
+
+1. Attends le redéploiement Railway (~1-2 min)
+2. Ouvre ces 2 URLs :
+
+**Test GraphQL (aliments individuels) :**
+```
+https://web-production-8be9.up.railway.app/test-graphql?date_str=2026-01-04
+```
+
+**Debug meals (structure actuelle) :**
+```
+https://web-production-8be9.up.railway.app/debug-meals?date_str=2026-01-04
