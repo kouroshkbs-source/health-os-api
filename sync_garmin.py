@@ -76,6 +76,7 @@ def fetch_garmin_data(client, target_date: str) -> dict:
         "sleepSeconds": 0,
         "weight": 0.0,
         "weightChange": 0.0,
+        "steps": 0,
     }
     
     # Body Battery
@@ -142,6 +143,24 @@ def fetch_garmin_data(client, target_date: str) -> dict:
         print(f"   ✓ Weight: {results['weight']} kg (change: {results['weightChange']})")
     except Exception as e:
         print(f"   ❌ Weight error: {e}")
+    
+    # Steps
+    try:
+        steps_data = client.get_steps_data(target_date)
+        print(f"   Steps raw type: {type(steps_data)}")
+        if steps_data:
+            if isinstance(steps_data, list) and len(steps_data) > 0:
+                # Sum all steps from the day
+                total_steps = 0
+                for item in steps_data:
+                    if isinstance(item, dict):
+                        total_steps += item.get("steps", 0) or 0
+                results["steps"] = total_steps
+            elif isinstance(steps_data, dict):
+                results["steps"] = steps_data.get("totalSteps", 0) or steps_data.get("steps", 0) or 0
+        print(f"   ✓ Steps: {results['steps']}")
+    except Exception as e:
+        print(f"   ❌ Steps error: {e}")
     
     return results
 
@@ -215,6 +234,9 @@ def create_journal_entry(target_date: str, garmin_data: dict) -> dict | None:
     if garmin_data["sleepDuration"] != "0h 00":
         properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
     
+    if garmin_data.get("steps", 0) > 0:
+        properties["Steps"] = {"number": garmin_data["steps"]}
+    
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
         "properties": properties
@@ -252,6 +274,9 @@ def update_journal_entry(page_id: str, garmin_data: dict) -> bool:
     if garmin_data["sleepDuration"] != "0h 00":
         properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
     
+    if garmin_data.get("steps", 0) > 0:
+        properties["Steps"] = {"number": garmin_data["steps"]}
+    
     if not properties:
         print("   ℹ️ No Garmin data to update")
         return True
@@ -283,7 +308,8 @@ def sync_to_notion(garmin_data: dict) -> bool:
         has_data = (
             garmin_data["weight"] > 0 or 
             garmin_data["sleepScore"] > 0 or 
-            garmin_data["bodyBattery"] > 0
+            garmin_data["bodyBattery"] > 0 or
+            garmin_data.get("steps", 0) > 0
         )
         if has_data:
             result = create_journal_entry(target_date, garmin_data)
@@ -324,10 +350,11 @@ def main():
         print(f"   Sleep Score: {garmin_data['sleepScore']}")
         print(f"   Sleep Duration: {garmin_data['sleepDuration']}")
         print(f"   Weight: {garmin_data['weight']} kg")
+        print(f"   Steps: {garmin_data.get('steps', 0)}")
         print("=" * 50)
         
         # Sync to Notion
-        if garmin_data["weight"] > 0 or garmin_data["bodyBattery"] > 0 or garmin_data["sleepScore"] > 0:
+        if garmin_data["weight"] > 0 or garmin_data["bodyBattery"] > 0 or garmin_data["sleepScore"] > 0 or garmin_data.get("steps", 0) > 0:
             print("\n📤 Syncing to Notion...")
             success = sync_to_notion(garmin_data)
             
