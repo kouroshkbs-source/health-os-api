@@ -146,9 +146,9 @@ def fetch_garmin_data(client, target_date: str) -> dict:
     
     # Steps - try multiple methods
     try:
-        # Method 1: Try get_daily_steps (different endpoint)
+        # Method 1: Try get_daily_steps with start and end date
         try:
-            steps_data = client.get_daily_steps(target_date)
+            steps_data = client.get_daily_steps(target_date, target_date)
             print(f"   Steps (daily_steps) raw: {type(steps_data)}")
             if steps_data:
                 if isinstance(steps_data, list) and len(steps_data) > 0:
@@ -157,29 +157,37 @@ def fetch_garmin_data(client, target_date: str) -> dict:
                         if isinstance(item, dict) and item.get("totalSteps", 0) > 0:
                             results["steps"] = item.get("totalSteps", 0)
                             break
+                        elif isinstance(item, dict) and item.get("steps", 0) > 0:
+                            results["steps"] = item.get("steps", 0)
+                            break
                 elif isinstance(steps_data, dict):
                     results["steps"] = steps_data.get("totalSteps", 0) or steps_data.get("steps", 0) or 0
             print(f"   ✓ Steps (method 1): {results['steps']}")
         except Exception as e1:
             print(f"   ⚠️ Method 1 failed: {e1}")
             
-            # Method 2: Try get_stats which includes steps
+            # Method 2: Try getting steps from activities endpoint
             try:
-                stats_data = client.get_stats(target_date)
-                print(f"   Stats raw: {type(stats_data)}")
-                if stats_data and isinstance(stats_data, dict):
-                    results["steps"] = stats_data.get("totalSteps", 0) or 0
-                print(f"   ✓ Steps (method 2 - stats): {results['steps']}")
+                activities = client.get_activities_fordate(target_date)
+                print(f"   Activities raw: {type(activities)}")
+                if activities and isinstance(activities, list):
+                    total_steps = 0
+                    for act in activities:
+                        if isinstance(act, dict):
+                            total_steps += act.get("steps", 0) or 0
+                    if total_steps > 0:
+                        results["steps"] = total_steps
+                print(f"   ✓ Steps (method 2 - activities): {results['steps']}")
             except Exception as e2:
                 print(f"   ⚠️ Method 2 failed: {e2}")
                 
-                # Method 3: Try user summary
+                # Method 3: Direct API call to steps endpoint
                 try:
-                    summary = client.get_user_summary(target_date)
-                    print(f"   Summary raw: {type(summary)}")
-                    if summary and isinstance(summary, dict):
-                        results["steps"] = summary.get("totalSteps", 0) or 0
-                    print(f"   ✓ Steps (method 3 - summary): {results['steps']}")
+                    steps_endpoint = client.garth.connectapi(f"/usersummary-service/stats/steps/daily/{target_date}/{target_date}")
+                    print(f"   Direct steps API: {type(steps_endpoint)}")
+                    if steps_endpoint and isinstance(steps_endpoint, list) and len(steps_endpoint) > 0:
+                        results["steps"] = steps_endpoint[0].get("totalSteps", 0) or 0
+                    print(f"   ✓ Steps (method 3 - direct): {results['steps']}")
                 except Exception as e3:
                     print(f"   ❌ All step methods failed: {e3}")
                     
