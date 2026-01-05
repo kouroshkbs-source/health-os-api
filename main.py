@@ -354,6 +354,7 @@ async def fetch_yazio_data(target_date: date) -> dict:
         "carbsGoal": 250,
         "fat": 0,
         "fatGoal": 70,
+        "caloriesBurned": 0,
     }
     
     date_str = target_date.strftime("%Y-%m-%d")
@@ -406,8 +407,16 @@ async def fetch_yazio_data(target_date: date) -> dict:
                     data["protein"] = int(total_protein)
                     data["carbs"] = int(total_carbs)
                     data["fat"] = int(total_fat)
+                    
+                    # Get burned calories from activities
+                    activities = day_data.get("activities", {})
+                    if activities:
+                        activity_nutrients = activities.get("nutrients", {})
+                        data["caloriesBurned"] = int(activity_nutrients.get("energy.energy", 0) or 0)
+                    
+                    logger.info(f"YAZIO activities data: {activities}")
                 
-                logger.info(f"YAZIO: {data['calories']}/{data['caloriesGoal']} kcal, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
+                logger.info(f"YAZIO: {data['calories']}/{data['caloriesGoal']} kcal, Burned: {data['caloriesBurned']}, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
                 
             elif response.status_code == 404:
                 # Fallback: try /user/consumed-items and /user/goals
@@ -1055,6 +1064,7 @@ async def fetch_notion_journal_entry(target_date: str) -> dict:
                     "sleepScore": int(get_number("Sleep score")),
                     "bodyBattery": int(get_number("Body battery")),
                     "sleepDuration": get_text("Sleep duration") or "0h 00",
+                    "steps": int(get_number("Steps")),
                 }
             else:
                 return {
@@ -1062,6 +1072,7 @@ async def fetch_notion_journal_entry(target_date: str) -> dict:
                     "sleepScore": 0,
                     "bodyBattery": 0,
                     "sleepDuration": "0h 00",
+                    "steps": 0,
                 }
         else:
             logger.error(f"Notion Journal query error: {response.status_code} - {response.text}")
@@ -1115,10 +1126,12 @@ async def widget_data():
         "sleepDuration": garmin_data.get("sleepDuration", "0h 00"),
         "weight": garmin_data.get("weight", 0),
         "weightChange": 0,  # TODO: calculate from previous days
+        "steps": garmin_data.get("steps", 0),
         
         # YAZIO data (directly from API - includes dynamic goals!)
         "calories": yazio_data.get("calories", 0),
         "caloriesGoal": yazio_data.get("caloriesGoal", 2000),
+        "caloriesBurned": yazio_data.get("caloriesBurned", 0),
         "protein": yazio_data.get("protein", 0),
         "proteinGoal": yazio_data.get("proteinGoal", 150),
         "carbs": yazio_data.get("carbs", 0),
