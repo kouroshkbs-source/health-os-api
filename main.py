@@ -53,6 +53,12 @@ GARMIN_DISPLAY_NAME = os.getenv("GARMIN_DISPLAY_NAME")
 YAZIO_EMAIL = os.getenv("YAZIO_EMAIL")
 YAZIO_PASSWORD = os.getenv("YAZIO_PASSWORD")
 
+# Notion credentials (for /widget endpoint)
+NOTION_TOKEN = os.getenv("NOTION_TOKEN")
+NOTION_TODAY_PAGE_ID = "2deda7da-88db-81c3-bfc9-dd213ebddd77"
+NOTION_JOURNAL_DB_ID = "2deda7da-88db-811f-98f5-f860d49af03d"
+NOTION_API_URL = "https://api.notion.com/v1"
+
 # YAZIO Client credentials
 # Auth and Data both on yzapi.yazio.com/v15
 YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
@@ -950,6 +956,178 @@ async def get_food_items(date_str: Optional[str] = None):
             "items": items,
             "totals": totals
         }
+
+
+# ============================================
+# WIDGET ENDPOINT (reads from Notion)
+# ============================================
+
+def notion_headers():
+    """Get headers for Notion API requests."""
+    return {
+        "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Content-Type": "application/json",
+        "Notion-Version": "2022-06-28"
+    }
+
+
+async def fetch_notion_today_page() -> dict:
+    """Fetch Today page from Notion to get macro totals."""
+    if not NOTION_TOKEN:
+        return {"error": "NOTION_TOKEN not set"}
+    
+    url = f"{NOTION_API_URL}/pages/{NOTION_TODAY_PAGE_ID}"
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.get(url, headers=notion_headers())
+        
+        if response.status_code == 200:
+            data = response.json()
+            props = data.get("properties", {})
+            
+            # Parse formula strings like "🍴 762.9 kcal" → 762.9
+            def parse_formula(prop_name: str) -> float:
+                prop = props.get(prop_name, {})
+                if prop.get("type") == "formula":
+                    formula = prop.get("formula", {})
+                    if formula.get("type") == "string":
+                        text = formula.get("string", "")
+                        # Extract number from string
+                        import re
+                        match = re.search(r'[\d.]+', text)
+                        if match:
+                            return float(match.group())
+                return 0.0
+            
+            return {
+                "calories": parse_formula("Total Calories"),
+                "protein": parse_formula("Total Protein"),
+                "carbs": parse_formula("Total Carbs"),
+                "fat": parse_formula("Total Fat"),
+            }
+        else:
+            logger.error(f"Notion Today page error: {response.status_code} - {response.text}")
+            return {"error": f"Notion error: {response.status_code}"}
+
+
+async def fetch_notion_journal_entry(target_date: str) -> dict:
+    """Fetch Journal entry from Notion to get Garmin data."""
+    if not NOTION_TOKEN:
+        return {"error": "NOTION_TOKEN not set"}
+    
+    url = f"{NOTION_API_URL}/databases/{NOTION_JOURNAL_DB_ID}/query"
+    
+    payload = {
+        "filter": {
+            "property": "Date",
+            "date": {"equals": target_date}
+        }
+    }
+    
+    async with httpx.AsyncClient() as client:
+        response = await client.post(url, headers=notion_headers(), json=payload)
+        
+        if response.status_code == 200:
+            data = response.json()
+            results = data.get("results", [])
+            
+            if results:
+                props = results[0].get("properties", {})
+                
+                # Parse number properties
+                def get_number(prop_name: str) -> float:
+                    prop = props.get(prop_name, {})
+                    if prop.get("type") == "number":
+                        return prop.get("number") or 0
+                    return 0
+                
+                # Parse rich_text properties
+                def get_text(prop_name: str) -> str:
+                    prop = props.get(prop_name, {})
+                    if prop.get("type") == "rich_text":
+                        texts = prop.get("rich_text", [])
+                        if texts:
+                            return texts[0].get("plain_text", "")
+                    return ""
+                
+                return {
+                    "weight": get_number("Weight"),
+                    "sleepScore": int(get_number("Sleep score")),
+                    "bodyBattery": int(get_number("Body battery")),
+                    "sleepDuration": get_text("Sleep duration") or "0h 00",
+                }
+            else:
+                return {
+                    "weight": 0,
+                    "sleepScore": 0,
+                    "bodyBattery": 0,
+                    "sleepDuration": "0h 00",
+                }
+        else:
+            logger.error(f"Notion Journal query error: {response.status_code} - {response.text}")
+            return {"error": f"Notion error: {response.status_code}"}
+
+
+@app.get("/widget")
+async def widget_data():
+    """
+    Widget endpoint - aggregates data from Notion (populated by GitHub Actions + N8N).
+    
+    Returns all data needed by the Health OS widget:
+    - Garmin data (from Journal database, synced by GitHub Actions)
+    - YAZIO data (from Today page, synced by N8N)
+    """
+    today = date.today()
+    today_str = today.isoformat()
+    
+    # Format date for display (e.g., "LUN 05 JAN")
+    days_fr = ['LUN', 'MAR', 'MER', 'JEU', 'VEN', 'SAM', 'DIM']
+    months_fr = ['JAN', 'FÉV', 'MAR', 'AVR', 'MAI', 'JUN', 'JUL', 'AOÛ', 'SEP', 'OCT', 'NOV', 'DÉC']
+    date_display = f"{days_fr[today.weekday()]} {today.day:02d} {months_fr[today.month - 1]}"
+    
+    errors = []
+    
+    # Fetch Garmin data from Notion Journal
+    garmin_data = await fetch_notion_journal_entry(today_str)
+    if "error" in garmin_data:
+        errors.append(garmin_data["error"])
+        garmin_data = {"weight": 0, "sleepScore": 0, "bodyBattery": 0, "sleepDuration": "0h 00"}
+    
+    # Fetch YAZIO data from Notion Today page
+    yazio_data = await fetch_notion_today_page()
+    if "error" in yazio_data:
+        errors.append(yazio_data["error"])
+        yazio_data = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+    
+    # Build response
+    response = {
+        "date": date_display,
+        "dateISO": today_str,
+        
+        # Garmin data (from Notion Journal)
+        "bodyBattery": garmin_data.get("bodyBattery", 0),
+        "sleepScore": garmin_data.get("sleepScore", 0),
+        "sleepDuration": garmin_data.get("sleepDuration", "0h 00"),
+        "weight": garmin_data.get("weight", 0),
+        "weightChange": 0,  # TODO: calculate from previous days
+        
+        # YAZIO data (from Notion Today page)
+        "calories": int(yazio_data.get("calories", 0)),
+        "caloriesGoal": 2000,
+        "protein": int(yazio_data.get("protein", 0)),
+        "proteinGoal": 150,
+        "carbs": int(yazio_data.get("carbs", 0)),
+        "carbsGoal": 250,
+        "fat": int(yazio_data.get("fat", 0)),
+        "fatGoal": 70,
+        
+        # Meta
+        "lastUpdated": datetime.now().isoformat(),
+        "errors": errors if errors else None,
+        "source": "notion"
+    }
+    
+    return response
 
 
 # ============================================
