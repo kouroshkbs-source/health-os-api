@@ -196,17 +196,28 @@ def create_journal_entry(target_date: str, garmin_data: dict) -> dict | None:
     
     url = f"{NOTION_API_URL}/pages"
     
+    # Build properties - only include non-zero values
+    properties = {
+        "Date": {
+            "date": {"start": target_date}
+        },
+    }
+    
+    if garmin_data["weight"] > 0:
+        properties["Weight"] = {"number": garmin_data["weight"]}
+    
+    if garmin_data["sleepScore"] > 0:
+        properties["Sleep score"] = {"number": garmin_data["sleepScore"]}
+    
+    if garmin_data["bodyBattery"] > 0:
+        properties["Body battery"] = {"number": garmin_data["bodyBattery"]}
+    
+    if garmin_data["sleepDuration"] != "0h 00":
+        properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
+    
     payload = {
         "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": {
-            "Date": {
-                "date": {"start": target_date}
-            },
-            "Weight": {
-                "number": garmin_data["weight"] if garmin_data["weight"] > 0 else None
-            },
-            # Note: Calories, Protein, Carbs, Fat will be filled by N8N Daily Close workflow
-        }
+        "properties": properties
     }
     
     response = httpx.post(url, headers=notion_headers(), json=payload)
@@ -226,11 +237,20 @@ def update_journal_entry(page_id: str, garmin_data: dict) -> bool:
     
     url = f"{NOTION_API_URL}/pages/{page_id}"
     
-    # Only update Weight (other fields managed by N8N)
+    # Build properties - only include non-zero values
     properties = {}
     
     if garmin_data["weight"] > 0:
         properties["Weight"] = {"number": garmin_data["weight"]}
+    
+    if garmin_data["sleepScore"] > 0:
+        properties["Sleep score"] = {"number": garmin_data["sleepScore"]}
+    
+    if garmin_data["bodyBattery"] > 0:
+        properties["Body battery"] = {"number": garmin_data["bodyBattery"]}
+    
+    if garmin_data["sleepDuration"] != "0h 00":
+        properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
     
     if not properties:
         print("   ℹ️ No Garmin data to update")
@@ -259,12 +279,17 @@ def sync_to_notion(garmin_data: dict) -> bool:
         # Update existing entry
         return update_journal_entry(existing["id"], garmin_data)
     else:
-        # Create new entry (only if we have weight data)
-        if garmin_data["weight"] > 0:
+        # Create new entry if we have ANY Garmin data
+        has_data = (
+            garmin_data["weight"] > 0 or 
+            garmin_data["sleepScore"] > 0 or 
+            garmin_data["bodyBattery"] > 0
+        )
+        if has_data:
             result = create_journal_entry(target_date, garmin_data)
             return result is not None
         else:
-            print("   ℹ️ No weight data, skipping entry creation")
+            print("   ℹ️ No Garmin data available, skipping entry creation")
             return True
 
 
