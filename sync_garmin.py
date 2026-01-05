@@ -144,21 +144,45 @@ def fetch_garmin_data(client, target_date: str) -> dict:
     except Exception as e:
         print(f"   ❌ Weight error: {e}")
     
-    # Steps
+    # Steps - try multiple methods
     try:
-        steps_data = client.get_steps_data(target_date)
-        print(f"   Steps raw type: {type(steps_data)}")
-        if steps_data:
-            if isinstance(steps_data, list) and len(steps_data) > 0:
-                # Sum all steps from the day
-                total_steps = 0
-                for item in steps_data:
-                    if isinstance(item, dict):
-                        total_steps += item.get("steps", 0) or 0
-                results["steps"] = total_steps
-            elif isinstance(steps_data, dict):
-                results["steps"] = steps_data.get("totalSteps", 0) or steps_data.get("steps", 0) or 0
-        print(f"   ✓ Steps: {results['steps']}")
+        # Method 1: Try get_daily_steps (different endpoint)
+        try:
+            steps_data = client.get_daily_steps(target_date)
+            print(f"   Steps (daily_steps) raw: {type(steps_data)}")
+            if steps_data:
+                if isinstance(steps_data, list) and len(steps_data) > 0:
+                    # Get the last entry which should have total steps
+                    for item in reversed(steps_data):
+                        if isinstance(item, dict) and item.get("totalSteps", 0) > 0:
+                            results["steps"] = item.get("totalSteps", 0)
+                            break
+                elif isinstance(steps_data, dict):
+                    results["steps"] = steps_data.get("totalSteps", 0) or steps_data.get("steps", 0) or 0
+            print(f"   ✓ Steps (method 1): {results['steps']}")
+        except Exception as e1:
+            print(f"   ⚠️ Method 1 failed: {e1}")
+            
+            # Method 2: Try get_stats which includes steps
+            try:
+                stats_data = client.get_stats(target_date)
+                print(f"   Stats raw: {type(stats_data)}")
+                if stats_data and isinstance(stats_data, dict):
+                    results["steps"] = stats_data.get("totalSteps", 0) or 0
+                print(f"   ✓ Steps (method 2 - stats): {results['steps']}")
+            except Exception as e2:
+                print(f"   ⚠️ Method 2 failed: {e2}")
+                
+                # Method 3: Try user summary
+                try:
+                    summary = client.get_user_summary(target_date)
+                    print(f"   Summary raw: {type(summary)}")
+                    if summary and isinstance(summary, dict):
+                        results["steps"] = summary.get("totalSteps", 0) or 0
+                    print(f"   ✓ Steps (method 3 - summary): {results['steps']}")
+                except Exception as e3:
+                    print(f"   ❌ All step methods failed: {e3}")
+                    
     except Exception as e:
         print(f"   ❌ Steps error: {e}")
     
