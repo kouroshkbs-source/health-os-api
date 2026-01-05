@@ -1071,11 +1071,11 @@ async def fetch_notion_journal_entry(target_date: str) -> dict:
 @app.get("/widget")
 async def widget_data():
     """
-    Widget endpoint - aggregates data from Notion (populated by GitHub Actions + N8N).
+    Widget endpoint - aggregates data from multiple sources.
     
     Returns all data needed by the Health OS widget:
-    - Garmin data (from Journal database, synced by GitHub Actions)
-    - YAZIO data (from Today page, synced by N8N)
+    - Garmin data (from Notion Journal, synced by GitHub Actions)
+    - YAZIO data (directly from YAZIO API for real-time goals)
     """
     today = date.today()
     today_str = today.isoformat()
@@ -1093,11 +1093,16 @@ async def widget_data():
         errors.append(garmin_data["error"])
         garmin_data = {"weight": 0, "sleepScore": 0, "bodyBattery": 0, "sleepDuration": "0h 00"}
     
-    # Fetch YAZIO data from Notion Today page
-    yazio_data = await fetch_notion_today_page()
+    # Fetch YAZIO data directly from API (for dynamic goals)
+    yazio_data = await fetch_yazio_data(today)
     if "error" in yazio_data:
         errors.append(yazio_data["error"])
-        yazio_data = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+        yazio_data = {
+            "calories": 0, "caloriesGoal": 2000,
+            "protein": 0, "proteinGoal": 150,
+            "carbs": 0, "carbsGoal": 250,
+            "fat": 0, "fatGoal": 70
+        }
     
     # Build response
     response = {
@@ -1111,20 +1116,20 @@ async def widget_data():
         "weight": garmin_data.get("weight", 0),
         "weightChange": 0,  # TODO: calculate from previous days
         
-        # YAZIO data (from Notion Today page)
-        "calories": int(yazio_data.get("calories", 0)),
-        "caloriesGoal": 2000,
-        "protein": int(yazio_data.get("protein", 0)),
-        "proteinGoal": 150,
-        "carbs": int(yazio_data.get("carbs", 0)),
-        "carbsGoal": 250,
-        "fat": int(yazio_data.get("fat", 0)),
-        "fatGoal": 70,
+        # YAZIO data (directly from API - includes dynamic goals!)
+        "calories": yazio_data.get("calories", 0),
+        "caloriesGoal": yazio_data.get("caloriesGoal", 2000),
+        "protein": yazio_data.get("protein", 0),
+        "proteinGoal": yazio_data.get("proteinGoal", 150),
+        "carbs": yazio_data.get("carbs", 0),
+        "carbsGoal": yazio_data.get("carbsGoal", 250),
+        "fat": yazio_data.get("fat", 0),
+        "fatGoal": yazio_data.get("fatGoal", 70),
         
         # Meta
         "lastUpdated": datetime.now().isoformat(),
         "errors": errors if errors else None,
-        "source": "notion"
+        "source": "yazio+notion"
     }
     
     return response
