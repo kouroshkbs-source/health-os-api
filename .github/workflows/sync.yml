@@ -1,10 +1,14 @@
-name: Daily Health Sync
+name: Garmin → Notion Sync
 
 on:
   schedule:
-    # Lance le script tous les jours à 06h00 UTC (07h00 heure belge)
-    - cron: '0 6 * * *'
-  workflow_dispatch: # Bouton pour lancer manuellement
+    # Multiple runs in the morning to catch data after wake-up
+    # Times in UTC (Belgium = UTC+1 in winter, UTC+2 in summer)
+    - cron: '0 5 * * *'   # 06:00 Belgium winter / 07:00 summer
+    - cron: '0 6 * * *'   # 07:00 Belgium winter / 08:00 summer
+    - cron: '0 7 * * *'   # 08:00 Belgium winter / 09:00 summer
+    - cron: '0 8 * * *'   # 09:00 Belgium winter / 10:00 summer
+  workflow_dispatch: # Manual trigger button
 
 jobs:
   sync:
@@ -24,8 +28,9 @@ jobs:
         python -m pip install --upgrade pip
         pip install garth garminconnect httpx
 
-    - name: Run Sync Script
+    - name: Run Garmin → Notion Sync
       env:
         GARMIN_OAUTH_TOKEN: ${{ secrets.GARMIN_OAUTH_TOKEN }}
         GARMIN_DISPLAY_NAME: ${{ secrets.GARMIN_DISPLAY_NAME }}
+        NOTION_TOKEN: ${{ secrets.NOTION_TOKEN }}
       run: python sync_garmin.py
