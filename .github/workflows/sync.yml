@@ -2,12 +2,16 @@ name: Garmin → Notion Sync
 
 on:
   schedule:
-    # Multiple runs in the morning to catch data after wake-up
-    # Times in UTC (Belgium = UTC+1 in winter, UTC+2 in summer)
-    - cron: '0 5 * * *'   # 06:00 Belgium winter / 07:00 summer
-    - cron: '0 6 * * *'   # 07:00 Belgium winter / 08:00 summer
-    - cron: '0 7 * * *'   # 08:00 Belgium winter / 09:00 summer
-    - cron: '0 8 * * *'   # 09:00 Belgium winter / 10:00 summer
+    # Run every 2 hours during the day for step updates
+    - cron: '0 5 * * *'   # 06:00 Belgium
+    - cron: '0 7 * * *'   # 08:00 Belgium
+    - cron: '0 9 * * *'   # 10:00 Belgium
+    - cron: '0 11 * * *'  # 12:00 Belgium
+    - cron: '0 13 * * *'  # 14:00 Belgium
+    - cron: '0 15 * * *'  # 16:00 Belgium
+    - cron: '0 17 * * *'  # 18:00 Belgium
+    - cron: '0 19 * * *'  # 20:00 Belgium
+    - cron: '0 21 * * *'  # 22:00 Belgium
   workflow_dispatch: # Manual trigger button
 
 jobs:
