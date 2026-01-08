@@ -891,8 +891,8 @@ async def get_food_items(date_str: Optional[str] = None):
                 continue
             
             # 3. Extract data
-            amount = consumed.get("amount", 0)  # Already in grams
-            serving = consumed.get("serving", "gram")
+            amount = consumed.get("amount", 0) or 0  # Already in grams
+            serving = consumed.get("serving") or "gram"  # Default to gram if None
             serving_quantity = consumed.get("serving_quantity")
             # Handle None or missing serving_quantity
             if serving_quantity is None:
@@ -913,7 +913,7 @@ async def get_food_items(date_str: Optional[str] = None):
             fat = round(fat_per_g * amount, 2)
             
             # 5. Build reference string
-            if serving == "gram":
+            if not serving or serving == "gram":
                 reference = f"{int(amount)}g"
             else:
                 # Safety check for serving_quantity
@@ -921,7 +921,8 @@ async def get_food_items(date_str: Optional[str] = None):
                     qty_str = str(int(serving_quantity))
                 else:
                     qty_str = str(serving_quantity) if serving_quantity else "1"
-                reference = f"{qty_str} {serving.capitalize()} ({int(amount)}g)"
+                serving_name = serving.capitalize() if serving else "Serving"
+                reference = f"{qty_str} {serving_name} ({int(amount)}g)"
             
             # 6. Map meal (daytime → Notion format)
             meal_map = {
