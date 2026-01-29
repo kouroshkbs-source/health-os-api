@@ -11,12 +11,14 @@ import os
 import json
 import logging
 import tempfile
+import shutil
 from datetime import datetime, date, timedelta
-from typing import Optional
+from zoneinfo import ZoneInfo
+from typing import Optional, List
 import httpx
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # ============================================
 # CONFIGURATION
@@ -28,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="3.0.0"
+    version="4.0.0"
 )
 
 # CORS for widget access
@@ -59,11 +61,21 @@ NOTION_TODAY_PAGE_ID = "2deda7da-88db-81c3-bfc9-dd213ebddd77"
 NOTION_JOURNAL_DB_ID = "2deda7da-88db-811f-98f5-f860d49af03d"
 NOTION_API_URL = "https://api.notion.com/v1"
 
-# YAZIO Client credentials
+# YAZIO Client credentials (from env vars for security)
 # Auth and Data both on yzapi.yazio.com/v15
 YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
-YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
-YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
+YAZIO_CLIENT_ID = os.getenv("YAZIO_CLIENT_ID")
+YAZIO_CLIENT_SECRET = os.getenv("YAZIO_CLIENT_SECRET")
+
+# Debug mode (disabled by default in production)
+ENABLE_DEBUG = os.getenv("ENABLE_DEBUG", "0") == "1"
+
+# Timezone (Railway runs in UTC, we want Belgium time)
+LOCAL_TZ = ZoneInfo("Europe/Brussels")
+
+def today_local() -> date:
+    """Get today's date in local timezone (Europe/Brussels)"""
+    return datetime.now(LOCAL_TZ).date()
 
 # Token storage
 garmin_client = None
@@ -84,6 +96,7 @@ class HealthData(BaseModel):
     # YAZIO data
     calories: int = 0
     caloriesGoal: int = 2000
+    caloriesBurned: int = 0
     protein: int = 0
     proteinGoal: int = 150
     carbs: int = 0
@@ -92,8 +105,33 @@ class HealthData(BaseModel):
     fatGoal: int = 70
     # Meta
     lastUpdated: str = ""
-    errors: list = []
-    sources: list = []
+    errors: List[str] = Field(default_factory=list)
+    sources: List[str] = Field(default_factory=list)
+
+# ============================================
+# HELPER FUNCTIONS
+# ============================================
+
+def safe_float(x, default=0.0) -> float:
+    """Safely convert to float, returning default if None or invalid."""
+    try:
+        if x is None:
+            return default
+        return float(x)
+    except Exception:
+        return default
+
+def fmt_amount(x) -> str:
+    """Format amount for reference string without losing decimals."""
+    try:
+        x = float(x)
+        if x.is_integer():
+            return str(int(x))
+        return f"{x:.1f}".rstrip("0").rstrip(".")
+    except Exception:
+        return str(x)
+
+SUPPORTED_GRAM_UNITS = {"g", "gram", "grams"}
 
 # ============================================
 # GARMIN FUNCTIONS (Token-based)
@@ -139,6 +177,9 @@ def get_garmin_client():
         # Load the saved tokens
         client.garth.load(temp_dir)
         
+        # Clean up temp directory to avoid disk bloat on Railway
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        
         logger.info(f"oauth1_token exists: {client.garth.oauth1_token is not None}")
         logger.info(f"oauth2_token exists: {client.garth.oauth2_token is not None}")
         
@@ -156,7 +197,7 @@ def get_garmin_client():
                 user_settings = client.garth.connectapi(
                     "/userprofile-service/userprofile/user-settings"
                 )
-                logger.info(f"user-settings response: {user_settings}")
+                logger.info(f"user-settings response keys: {list(user_settings.keys()) if isinstance(user_settings, dict) else type(user_settings)}")
                 
                 display_name = None
                 if user_settings and isinstance(user_settings, dict):
@@ -211,7 +252,7 @@ def fetch_garmin_data(target_date: date) -> dict:
         # Body Battery
         try:
             bb_data = client.get_body_battery(date_str)
-            logger.info(f"Garmin Body Battery raw response: {bb_data}")
+            logger.info(f"Garmin Body Battery: {len(bb_data) if isinstance(bb_data, list) else type(bb_data)} items")
             if bb_data:
                 if isinstance(bb_data, list) and len(bb_data) > 0:
                     max_bb = 0
@@ -255,19 +296,28 @@ def fetch_garmin_data(target_date: date) -> dict:
         try:
             start_date = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
             weight_data = client.get_body_composition(start_date, date_str)
-            logger.info(f"Garmin Weight raw response: {weight_data}")
             
-            if weight_data:
-                weights = weight_data.get("dateWeightList", []) or weight_data.get("weightList", [])
-                if weights and len(weights) > 0:
-                    latest = weights[-1]
-                    weight_grams = latest.get("weight", 0)
-                    if weight_grams > 0:
-                        data["weight"] = round(weight_grams / 1000, 1)
-                        
-                        if len(weights) > 1:
-                            first_weight = weights[0].get("weight", 0) / 1000
-                            data["weightChange"] = round(data["weight"] - first_weight, 1)
+            # Extract weights (handle both dict and list responses)
+            weights = []
+            if isinstance(weight_data, dict):
+                weights = weight_data.get("dateWeightList") or weight_data.get("weightList") or []
+                logger.info(f"Garmin Weight: {len(weights)} entries (dict)")
+            elif isinstance(weight_data, list):
+                weights = weight_data
+                logger.info(f"Garmin Weight: {len(weights)} entries (list)")
+            else:
+                logger.info(f"Garmin Weight: unexpected type {type(weight_data)}")
+            
+            if weights and len(weights) > 0:
+                latest = weights[-1]
+                weight_grams = latest.get("weight", 0) if isinstance(latest, dict) else 0
+                if weight_grams > 0:
+                    data["weight"] = round(weight_grams / 1000, 1)
+                    
+                    if len(weights) > 1:
+                        first = weights[0]
+                        first_weight = (first.get("weight", 0) if isinstance(first, dict) else 0) / 1000
+                        data["weightChange"] = round(data["weight"] - first_weight, 1)
             logger.info(f"Weight: {data['weight']} kg")
         except Exception as e:
             logger.warning(f"Could not fetch weight data: {e}")
@@ -290,6 +340,11 @@ async def yazio_login() -> Optional[str]:
         logger.warning("YAZIO credentials not set")
         return None
     
+    # Check client credentials
+    if not YAZIO_CLIENT_ID or not YAZIO_CLIENT_SECRET:
+        logger.warning("YAZIO client credentials (CLIENT_ID/CLIENT_SECRET) not set")
+        return None
+    
     # Check if we have a valid cached token
     if yazio_token:
         expires_at = yazio_token.get("expires_at", 0)
@@ -298,7 +353,7 @@ async def yazio_login() -> Optional[str]:
             return yazio_token.get("access_token")
     
     try:
-        logger.info(f"Logging into YAZIO with {YAZIO_EMAIL}...")
+        logger.info("Logging into YAZIO...")
         
         # Request body as JSON
         payload = {
@@ -309,7 +364,7 @@ async def yazio_login() -> Optional[str]:
             "grant_type": "password"
         }
         
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0) as client:
             # Auth on v15 endpoint
             response = await client.post(
                 f"{YAZIO_BASE_URL}/oauth/token",
@@ -363,10 +418,11 @@ async def fetch_yazio_data(target_date: date) -> dict:
         "Authorization": f"Bearer {token}",
         "Accept": "application/json",
         "Content-Type": "application/json",
+        "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)",
     }
     
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
             # Use correct endpoint: /user/widgets/daily-summary
             url = f"{YAZIO_BASE_URL}/user/widgets/daily-summary?date={date_str}"
             logger.info(f"YAZIO endpoint: {url}")
@@ -383,38 +439,38 @@ async def fetch_yazio_data(target_date: date) -> dict:
                 if isinstance(day_data, dict):
                     goals = day_data.get("goals", {})
                     if goals:
-                        data["caloriesGoal"] = int(goals.get("energy.energy", 2000) or 2000)
-                        data["proteinGoal"] = int(goals.get("nutrient.protein", 150) or 150)
-                        data["carbsGoal"] = int(goals.get("nutrient.carb", 250) or 250)
-                        data["fatGoal"] = int(goals.get("nutrient.fat", 70) or 70)
+                        data["caloriesGoal"] = int(round(safe_float(goals.get("energy.energy"), 2000)))
+                        data["proteinGoal"] = int(round(safe_float(goals.get("nutrient.protein"), 150)))
+                        data["carbsGoal"] = int(round(safe_float(goals.get("nutrient.carb"), 250)))
+                        data["fatGoal"] = int(round(safe_float(goals.get("nutrient.fat"), 70)))
                     
                     # Calculate totals from meals (breakfast, lunch, dinner, snack)
                     meals = day_data.get("meals", {})
-                    total_energy = 0
-                    total_protein = 0
-                    total_carbs = 0
-                    total_fat = 0
+                    total_energy = 0.0
+                    total_protein = 0.0
+                    total_carbs = 0.0
+                    total_fat = 0.0
                     
                     for meal_type in ["breakfast", "lunch", "dinner", "snack"]:
                         meal = meals.get(meal_type, {})
                         nutrients = meal.get("nutrients", {})
-                        total_energy += nutrients.get("energy.energy", 0) or 0
-                        total_protein += nutrients.get("nutrient.protein", 0) or 0
-                        total_carbs += nutrients.get("nutrient.carb", 0) or 0
-                        total_fat += nutrients.get("nutrient.fat", 0) or 0
+                        total_energy += safe_float(nutrients.get("energy.energy"), 0.0)
+                        total_protein += safe_float(nutrients.get("nutrient.protein"), 0.0)
+                        total_carbs += safe_float(nutrients.get("nutrient.carb"), 0.0)
+                        total_fat += safe_float(nutrients.get("nutrient.fat"), 0.0)
                     
-                    data["calories"] = int(total_energy)
-                    data["protein"] = int(total_protein)
-                    data["carbs"] = int(total_carbs)
-                    data["fat"] = int(total_fat)
+                    data["calories"] = int(round(total_energy))
+                    data["protein"] = int(round(total_protein))
+                    data["carbs"] = int(round(total_carbs))
+                    data["fat"] = int(round(total_fat))
                     
                     # Get burned calories from activities
                     activities = day_data.get("activities", {})
                     if activities:
                         activity_nutrients = activities.get("nutrients", {})
-                        data["caloriesBurned"] = int(activity_nutrients.get("energy.energy", 0) or 0)
+                        data["caloriesBurned"] = int(round(safe_float(activity_nutrients.get("energy.energy"), 0.0)))
                     
-                    logger.info(f"YAZIO activities data: {activities}")
+                    logger.info(f"YAZIO activities: {len(activities) if isinstance(activities, list) else 'present'}")
                 
                 logger.info(f"YAZIO: {data['calories']}/{data['caloriesGoal']} kcal, Burned: {data['caloriesBurned']}, P:{data['protein']}g, C:{data['carbs']}g, F:{data['fat']}g")
                 
@@ -427,10 +483,10 @@ async def fetch_yazio_data(target_date: date) -> dict:
                 goals_resp = await client.get(goals_url, headers=headers)
                 if goals_resp.status_code == 200:
                     goals = goals_resp.json()
-                    data["caloriesGoal"] = int(goals.get("energy.energy", 2000) or 2000)
-                    data["proteinGoal"] = int(goals.get("nutrient.protein", 150) or 150)
-                    data["carbsGoal"] = int(goals.get("nutrient.carb", 250) or 250)
-                    data["fatGoal"] = int(goals.get("nutrient.fat", 70) or 70)
+                    data["caloriesGoal"] = int(round(safe_float(goals.get("energy.energy"), 2000)))
+                    data["proteinGoal"] = int(round(safe_float(goals.get("nutrient.protein"), 150)))
+                    data["carbsGoal"] = int(round(safe_float(goals.get("nutrient.carb"), 250)))
+                    data["fatGoal"] = int(round(safe_float(goals.get("nutrient.fat"), 70)))
                 
                 # Get consumed items - need to fetch each product's nutrients
                 items_url = f"{YAZIO_BASE_URL}/user/consumed-items?date={date_str}"
@@ -460,29 +516,30 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "3.0.0",
-        "timestamp": datetime.now().isoformat(),
+        "version": "4.0.0",
+        "timestamp": datetime.now(LOCAL_TZ).isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
             "yazio_credentials_set": bool(YAZIO_EMAIL and YAZIO_PASSWORD),
+            "yazio_client_set": bool(YAZIO_CLIENT_ID and YAZIO_CLIENT_SECRET),
         }
     }
 
 
 @app.get("/sync", response_model=HealthData)
-async def sync_health_data(date: Optional[str] = None):
+async def sync_health_data(date_str: Optional[str] = None):
     """
     Fetch and aggregate health data from all sources.
     
-    - **date**: Optional date in YYYY-MM-DD format. Defaults to today.
+    - **date_str**: Optional date in YYYY-MM-DD format. Defaults to today.
     """
-    if date:
+    if date_str:
         try:
-            target_date = datetime.strptime(date, "%Y-%m-%d").date()
+            target_date = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     else:
-        target_date = date.today()
+        target_date = today_local()
     
     errors = []
     sources = []
@@ -490,7 +547,7 @@ async def sync_health_data(date: Optional[str] = None):
     # Initialize response
     health_data = HealthData(
         date=target_date.strftime("%Y-%m-%d"),
-        lastUpdated=datetime.now().isoformat()
+        lastUpdated=datetime.now(LOCAL_TZ).isoformat()
     )
     
     # Fetch Garmin data
@@ -512,6 +569,7 @@ async def sync_health_data(date: Optional[str] = None):
     else:
         health_data.calories = yazio_data.get("calories", 0)
         health_data.caloriesGoal = yazio_data.get("caloriesGoal", 2000)
+        health_data.caloriesBurned = yazio_data.get("caloriesBurned", 0)
         health_data.protein = yazio_data.get("protein", 0)
         health_data.proteinGoal = yazio_data.get("proteinGoal", 150)
         health_data.carbs = yazio_data.get("carbs", 0)
@@ -535,7 +593,7 @@ async def garmin_only(date_str: Optional[str] = None):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     else:
-        target_date = date.today()
+        target_date = today_local()
     
     return fetch_garmin_data(target_date)
 
@@ -549,7 +607,7 @@ async def yazio_only(date_str: Optional[str] = None):
         except ValueError:
             raise HTTPException(status_code=400, detail="Invalid date format. Use YYYY-MM-DD")
     else:
-        target_date = date.today()
+        target_date = today_local()
     
     return await fetch_yazio_data(target_date)
 
@@ -576,7 +634,16 @@ async def test_connections():
         client = get_garmin_client()
         if client:
             result["garmin"]["status"] = "connected"
-            result["garmin"]["user"] = client.get_full_name()
+            # Safely get user name (API varies by version)
+            try:
+                name = client.get_full_name()
+            except:
+                name = getattr(client, "full_name", None) or getattr(client, "display_name", None)
+            result["garmin"]["user"] = name
+        elif GARMIN_OAUTH_TOKEN:
+            # Token is configured but client failed to initialize
+            result["garmin"]["status"] = "error"
+            result["garmin"]["error"] = "Token configured but client initialization failed (check logs)"
         else:
             result["garmin"]["status"] = "not_configured"
     except Exception as e:
@@ -603,8 +670,11 @@ async def test_graphql(date_str: Optional[str] = None):
     """
     Test YAZIO GraphQL endpoint to get individual food items.
     """
+    if not ENABLE_DEBUG:
+        raise HTTPException(status_code=404, detail="Debug endpoints disabled in production")
+    
     if date_str is None:
-        date_str = date.today().isoformat()
+        date_str = today_local().isoformat()
     
     token = await yazio_login()
     if not token:
@@ -641,7 +711,7 @@ async def test_graphql(date_str: Optional[str] = None):
     
     results = {}
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for endpoint in endpoints:
             try:
                 response = await client.post(
@@ -691,8 +761,11 @@ async def test_graphql(date_str: Optional[str] = None):
 @app.get("/debug-meals")
 async def debug_meals(date_str: Optional[str] = None):
     """Debug endpoint to see the full meals response structure."""
+    if not ENABLE_DEBUG:
+        raise HTTPException(status_code=404, detail="Debug endpoints disabled in production")
+    
     if date_str is None:
-        date_str = date.today().isoformat()
+        date_str = today_local().isoformat()
     
     token = await yazio_login()
     if not token:
@@ -700,7 +773,7 @@ async def debug_meals(date_str: Optional[str] = None):
     
     headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.get(
             f"{YAZIO_BASE_URL}/user/widgets/daily-summary?date={date_str}",
             headers=headers
@@ -721,8 +794,11 @@ async def debug_meals(date_str: Optional[str] = None):
 @app.get("/debug-consumed-items")
 async def debug_consumed_items(date_str: Optional[str] = None):
     """Test various endpoints for individual food items"""
+    if not ENABLE_DEBUG:
+        raise HTTPException(status_code=404, detail="Debug endpoints disabled in production")
+    
     if date_str is None:
-        date_str = date.today().isoformat()
+        date_str = today_local().isoformat()
     
     token = await yazio_login()
     if not token:
@@ -740,7 +816,7 @@ async def debug_consumed_items(date_str: Optional[str] = None):
     ]
     
     results = {}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for url in endpoints_to_try:
             try:
                 response = await client.get(url, headers=headers)
@@ -777,6 +853,9 @@ async def debug_consumed_items(date_str: Optional[str] = None):
 @app.get("/debug-product")
 async def debug_product(product_id: str):
     """Test fetching individual product details (name, macros, etc.)"""
+    if not ENABLE_DEBUG:
+        raise HTTPException(status_code=404, detail="Debug endpoints disabled in production")
+    
     token = await yazio_login()
     if not token:
         return {"error": "Could not get YAZIO token"}
@@ -794,7 +873,7 @@ async def debug_product(product_id: str):
     ]
     
     results = {}
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         for url in endpoints_to_try:
             try:
                 response = await client.get(url, headers=headers)
@@ -823,7 +902,7 @@ async def get_food_items(date_str: Optional[str] = None):
         - Ready for N8N sync to Notion
     """
     if date_str is None:
-        date_str = date.today().isoformat()
+        date_str = today_local().isoformat()
     
     # Validate date format
     try:
@@ -837,10 +916,11 @@ async def get_food_items(date_str: Optional[str] = None):
     
     headers = {
         "Authorization": f"Bearer {token}",
-        "Accept": "application/json"
+        "Accept": "application/json",
+        "User-Agent": "Yazio/7.3.10 (iPhone; iOS 16.2; Scale/3.00)",
     }
     
-    async with httpx.AsyncClient(timeout=30.0) as client:
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
         
         # 1. Get list of consumed items
         consumed_url = f"{YAZIO_BASE_URL}/user/consumed-items?date={date_str}"
@@ -853,8 +933,21 @@ async def get_food_items(date_str: Optional[str] = None):
             logger.error(f"Failed to fetch consumed-items: {e}")
             return {"error": f"Failed to fetch consumed-items: {str(e)}"}
         
-        # Extract products list
-        products_list = consumed_data.get("products", [])
+        # Extract products list (handle both dict and list responses)
+        if isinstance(consumed_data, dict):
+            # Try multiple possible keys
+            products_list = (
+                consumed_data.get("products") or 
+                consumed_data.get("items") or 
+                consumed_data.get("consumed_items") or 
+                consumed_data.get("entries") or 
+                []
+            )
+        elif isinstance(consumed_data, list):
+            products_list = consumed_data
+        else:
+            products_list = []
+            logger.warning(f"Unexpected consumed_data type: {type(consumed_data)}")
         
         if not products_list:
             return {
@@ -867,62 +960,100 @@ async def get_food_items(date_str: Optional[str] = None):
         # 2. For each item, fetch product details and calculate macros
         items = []
         totals = {"calories": 0, "protein": 0, "carbs": 0, "fat": 0}
+        product_cache = {}  # Cache to avoid duplicate API calls for same product
         
         for consumed in products_list:
-            product_id = consumed.get("product_id")
+            # Skip non-dict items (some APIs return strings/ids)
+            if not isinstance(consumed, dict):
+                logger.warning(f"Skipping non-dict item in products_list: {type(consumed)}")
+                continue
+            
+            # Robust product_id extraction (API can use different keys)
+            product_obj = consumed.get("product")
+            product_id = (
+                consumed.get("product_id")
+                or consumed.get("productId")
+                or (product_obj.get("id") if isinstance(product_obj, dict) else None)
+                or consumed.get("id")
+            )
             
             if not product_id:
                 continue
             
-            # Fetch product details
-            product_url = f"{YAZIO_BASE_URL}/products/{product_id}"
-            
-            try:
-                product_resp = await client.get(product_url, headers=headers)
-                product_resp.raise_for_status()
-                product_data = product_resp.json()
-            except Exception as e:
-                logger.warning(f"Failed to fetch product {product_id}: {e}")
-                items.append({
-                    "yazio_id": consumed.get("id"),
-                    "product_id": product_id,
-                    "error": f"Could not fetch product: {str(e)}"
-                })
-                continue
+            # Check cache first
+            if product_id in product_cache:
+                product_data = product_cache[product_id]
+            else:
+                # Fetch product details
+                product_url = f"{YAZIO_BASE_URL}/products/{product_id}"
+                
+                try:
+                    product_resp = await client.get(product_url, headers=headers)
+                    product_resp.raise_for_status()
+                    product_data = product_resp.json()
+                    product_cache[product_id] = product_data  # Cache it
+                except Exception as e:
+                    logger.warning(f"Failed to fetch product {product_id}: {e}")
+                    items.append({
+                        "yazio_id": consumed.get("id"),
+                        "product_id": product_id,
+                        "error": f"Could not fetch product: {str(e)}"
+                    })
+                    continue
             
             # 3. Extract data
-            amount = consumed.get("amount", 0) or 0  # Already in grams
+            amount = safe_float(consumed.get("amount"), 0.0)  # Amount in unit provided by API (see unit field)
             serving = consumed.get("serving") or "gram"  # Default to gram if None
             serving_quantity = consumed.get("serving_quantity")
-            # Handle None or missing serving_quantity
+            # Handle None or missing serving_quantity (use 1, not amount)
             if serving_quantity is None:
-                serving_quantity = amount if amount else 1
+                serving_quantity = 1
             
-            nutrients = product_data.get("nutrients", {})
+            # Raw nutrient values from API (use safe_float for robustness)
+            nutrients = product_data.get("nutrients") or {}
+            energy_raw = safe_float(nutrients.get("energy.energy"), 0.0)
+            protein_raw = safe_float(nutrients.get("nutrient.protein"), 0.0)
+            carbs_raw = safe_float(nutrients.get("nutrient.carb"), 0.0)
+            fat_raw = safe_float(nutrients.get("nutrient.fat"), 0.0)
             
-            # Macros per gram (decimal values)
-            energy_per_g = nutrients.get("energy.energy", 0) or 0
-            protein_per_g = nutrients.get("nutrient.protein", 0) or 0
-            carbs_per_g = nutrients.get("nutrient.carb", 0) or 0
-            fat_per_g = nutrients.get("nutrient.fat", 0) or 0
+            # Get unit from consumed data (may be g, ml, portion, etc.) - normalize
+            unit = (consumed.get("unit") or "g").strip()
             
             # 4. Calculate actual macros
-            calories = round(energy_per_g * amount, 1)
-            protein = round(protein_per_g * amount, 2)
-            carbs = round(carbs_per_g * amount, 2)
-            fat = round(fat_per_g * amount, 2)
-            
-            # 5. Build reference string
-            if not serving or serving == "gram":
-                reference = f"{int(amount)}g"
+            # STRICT MODE: Only calculate if unit is in grams (reliable)
+            # For other units (ml, portion, etc.), we can't reliably calculate
+            if unit.lower() not in SUPPORTED_GRAM_UNITS:
+                # Unit not in grams - can't reliably calculate macros
+                # Return None to indicate "unknown" (not "zero")
+                calories = None
+                protein = None
+                carbs = None
+                fat = None
+                nutrient_format = "unsupported_unit"
+                calc_skipped = True
             else:
-                # Safety check for serving_quantity
+                calc_skipped = False
+                # Always use per-100g (nutrition standard)
+                # The per-gram heuristic was unreliable (e.g., cucumber has <10 kcal/100g)
+                factor = amount / 100.0 if amount > 0 else 0
+                calories = round(energy_raw * factor, 1)
+                protein = round(protein_raw * factor, 2)
+                carbs = round(carbs_raw * factor, 2)
+                fat = round(fat_raw * factor, 2)
+                nutrient_format = "per_100g"
+            
+            # 5. Build reference string (use actual unit, preserve decimals)
+            if not serving or serving.lower() in ("gram", "grams"):
+                # Simple format: amount + unit
+                reference = f"{fmt_amount(amount)}{unit}"
+            else:
+                # Serving format: qty × serving (amount + unit)
                 if serving_quantity is not None and serving_quantity == int(serving_quantity):
                     qty_str = str(int(serving_quantity))
                 else:
                     qty_str = str(serving_quantity) if serving_quantity else "1"
                 serving_name = serving.capitalize() if serving else "Serving"
-                reference = f"{qty_str} {serving_name} ({int(amount)}g)"
+                reference = f"{qty_str} {serving_name} ({fmt_amount(amount)}{unit})"
             
             # 6. Map meal (daytime → Notion format)
             meal_map = {
@@ -940,7 +1071,7 @@ async def get_food_items(date_str: Optional[str] = None):
                 "name": product_data.get("name", "Unknown"),
                 "meal": meal,
                 "amount": amount,
-                "unit": "g",
+                "unit": unit,
                 "reference": reference,
                 "calories": calories,
                 "protein": protein,
@@ -950,25 +1081,42 @@ async def get_food_items(date_str: Optional[str] = None):
                 "serving_info": {
                     "serving": serving,
                     "serving_quantity": serving_quantity
+                },
+                # Debug info for nutrient calculation
+                "nutrient_format": nutrient_format,
+                "calc_skipped": calc_skipped,
+                "nutrients_raw": {
+                    "energy": energy_raw,
+                    "protein": protein_raw,
+                    "carbs": carbs_raw,
+                    "fat": fat_raw
                 }
             }
             
             items.append(item)
             
-            # Accumulate totals
-            totals["calories"] += calories
-            totals["protein"] += protein
-            totals["carbs"] += carbs
-            totals["fat"] += fat
+            # Accumulate totals (only if calculation was performed and not None)
+            if not calc_skipped and calories is not None:
+                totals["calories"] += calories
+                totals["protein"] += (protein or 0)
+                totals["carbs"] += (carbs or 0)
+                totals["fat"] += (fat or 0)
         
         # Round totals
         totals = {k: round(v, 1) for k, v in totals.items()}
         
+        # Count items with reliable calculations
+        calculated_count = sum(1 for it in items if (not it.get("calc_skipped")) and it.get("calories") is not None)
+        skipped_count = sum(1 for it in items if it.get("calc_skipped", False))
+        
         return {
             "date": date_str,
             "count": len(items),
+            "calculated_count": calculated_count,
+            "skipped_count": skipped_count,
             "items": items,
-            "totals": totals
+            "totals": totals,
+            "totals_note": "Totals only include items with supported units (grams)" if skipped_count > 0 else None
         }
 
 
@@ -992,7 +1140,7 @@ async def fetch_notion_today_page() -> dict:
     
     url = f"{NOTION_API_URL}/pages/{NOTION_TODAY_PAGE_ID}"
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.get(url, headers=notion_headers())
         
         if response.status_code == 200:
@@ -1038,7 +1186,7 @@ async def fetch_notion_journal_entry(target_date: str) -> dict:
         }
     }
     
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=15.0) as client:
         response = await client.post(url, headers=notion_headers(), json=payload)
         
         if response.status_code == 200:
@@ -1066,10 +1214,10 @@ async def fetch_notion_journal_entry(target_date: str) -> dict:
                 
                 return {
                     "weight": get_number("Weight"),
-                    "sleepScore": int(get_number("Sleep score")),
-                    "bodyBattery": int(get_number("Body battery")),
+                    "sleepScore": int(get_number("Sleep score") or 0),
+                    "bodyBattery": int(get_number("Body battery") or 0),
                     "sleepDuration": get_text("Sleep duration") or "0h 00",
-                    "steps": int(get_number("Steps")),
+                    "steps": int(get_number("Steps") or 0),
                 }
             else:
                 return {
@@ -1093,7 +1241,7 @@ async def widget_data():
     - Garmin data (from Notion Journal, synced by GitHub Actions)
     - YAZIO data (directly from YAZIO API for real-time goals)
     """
-    today = date.today()
+    today = today_local()
     today_str = today.isoformat()
     
     # Format date for display (e.g., "LUN 05 JAN")
@@ -1117,8 +1265,57 @@ async def widget_data():
             "calories": 0, "caloriesGoal": 2000,
             "protein": 0, "proteinGoal": 150,
             "carbs": 0, "carbsGoal": 250,
-            "fat": 0, "fatGoal": 70
+            "fat": 0, "fatGoal": 70,
+            "caloriesBurned": 0
         }
+    
+    # ============================================
+    # ADJUST GOALS BASED ON CALORIES BURNED
+    # Reproduces YAZIO's proportional scaling logic
+    # Ref: https://help.yazio.com/hc/en-us/articles/360002474498
+    # ============================================
+    
+    # Config: ratio cap from env var (default 2.0)
+    RATIO_CAP = float(os.getenv("YAZIO_GOAL_RATIO_CAP", "2.0"))
+    
+    # 1. Extract and sanitize base values
+    # - Clamp burned to 0 (avoid negative from sync corrections)
+    # - Clamp base to 1 minimum (avoid division by zero / negative cap)
+    # - Ensure proper int conversion with None handling
+    calories_burned_raw = max(0, int(yazio_data.get("caloriesBurned") or 0))
+    base_calories_goal = max(1, int(yazio_data.get("caloriesGoal") or 2000))
+    base_protein_goal = max(1, int(yazio_data.get("proteinGoal") or 150))
+    base_carbs_goal = max(1, int(yazio_data.get("carbsGoal") or 250))
+    base_fat_goal = max(1, int(yazio_data.get("fatGoal") or 70))
+    
+    # 2. Apply safety cap on burned calories
+    # Cap at RATIO_CAP × base goal to prevent UI explosion from GPS bugs
+    # Example: base=2000, cap=2.0 → max_burned=2000 → max adjusted=4000
+    max_burned_allowed = int(round(base_calories_goal * (RATIO_CAP - 1)))
+    calories_burned_used = max(0, min(calories_burned_raw, max_burned_allowed))
+    
+    # 3. Calculate adjusted calorie goal (capped)
+    adjusted_calories_goal = base_calories_goal + calories_burned_used
+    
+    # 4. Calculate adjustment ratio (base >= 1 is guaranteed, no division by zero)
+    adjustment_ratio = adjusted_calories_goal / base_calories_goal
+    
+    # 5. Apply proportional scaling to macros with proper rounding
+    # Using round() instead of int() to avoid systematic truncation bias
+    adjusted_protein_goal = int(round(base_protein_goal * adjustment_ratio))
+    adjusted_carbs_goal = int(round(base_carbs_goal * adjustment_ratio))
+    adjusted_fat_goal = int(round(base_fat_goal * adjustment_ratio))
+    
+    # 6. Log for debugging (includes raw vs used burned for cap detection)
+    was_capped = calories_burned_raw > calories_burned_used
+    logger.info(
+        f"Goals adjustment: burned_raw={calories_burned_raw}, burned_used={calories_burned_used}, "
+        f"capped={was_capped}, ratio={adjustment_ratio:.2f}, "
+        f"calories={base_calories_goal}→{adjusted_calories_goal}, "
+        f"protein={base_protein_goal}→{adjusted_protein_goal}, "
+        f"carbs={base_carbs_goal}→{adjusted_carbs_goal}, "
+        f"fat={base_fat_goal}→{adjusted_fat_goal}"
+    )
     
     # Build response
     response = {
@@ -1133,21 +1330,35 @@ async def widget_data():
         "weightChange": 0,  # TODO: calculate from previous days
         "steps": garmin_data.get("steps", 0),
         
-        # YAZIO data (directly from API - includes dynamic goals!)
+        # YAZIO data with ADJUSTED goals based on calories burned
         "calories": yazio_data.get("calories", 0),
-        "caloriesGoal": yazio_data.get("caloriesGoal", 2000),
-        "caloriesBurned": yazio_data.get("caloriesBurned", 0),
+        "caloriesGoal": adjusted_calories_goal,
+        "caloriesGoalBase": base_calories_goal,
+        "caloriesBurnedUsed": calories_burned_used,  # Value used for calculation (may be capped)
+        "caloriesBurnedRaw": calories_burned_raw,    # Original value from YAZIO before cap
+        
         "protein": yazio_data.get("protein", 0),
-        "proteinGoal": yazio_data.get("proteinGoal", 150),
+        "proteinGoal": adjusted_protein_goal,
+        "proteinGoalBase": base_protein_goal,
+        
         "carbs": yazio_data.get("carbs", 0),
-        "carbsGoal": yazio_data.get("carbsGoal", 250),
+        "carbsGoal": adjusted_carbs_goal,
+        "carbsGoalBase": base_carbs_goal,
+        
         "fat": yazio_data.get("fat", 0),
-        "fatGoal": yazio_data.get("fatGoal", 70),
+        "fatGoal": adjusted_fat_goal,
+        "fatGoalBase": base_fat_goal,
         
         # Meta
-        "lastUpdated": datetime.now().isoformat(),
+        "lastUpdated": datetime.now(LOCAL_TZ).isoformat(),
         "errors": errors if errors else None,
-        "source": "yazio+notion"
+        "source": "yazio+notion",
+        
+        # Adjustment flags (useful for frontend/debug)
+        "goalsAdjusted": calories_burned_used > 0,
+        "goalsCapped": was_capped,
+        "adjustmentRatio": round(adjustment_ratio, 2),
+        "goalsAlgorithm": "yazio_proportional_v1"
     }
     
     return response
