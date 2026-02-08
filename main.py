@@ -1,7 +1,8 @@
 """
-Health OS API v4.2.0 - Added /sleep-week endpoint for live charts
+Health OS API v4.3.0 - Added Quick Notes endpoints
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + individual food items with full macros
+- Quick Notes: CRUD for Notion-backed notes widget
 - FIX: YAZIO nutrients are PER GRAM, not per 100g
 
 Deploy on Railway
@@ -28,7 +29,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.2.0"
+    version="4.3.0"
 )
 
 # CORS for widget access
@@ -58,9 +59,41 @@ YAZIO_BASE_URL = "https://yzapi.yazio.com/v15"
 YAZIO_CLIENT_ID = "1_4hiybetvfksgw40o0sog4s884kwc840wwso8go4k8c04goo4c"
 YAZIO_CLIENT_SECRET = "6rok2m65xuskgkgogw40wkkk8sw0osg84s8cggsc4woos4s8o"
 
+# Notion API (for Quick Notes)
+NOTION_BASE = "https://api.notion.com/v1"
+NOTION_VERSION = "2022-06-28"
+
 # Token storage
 garmin_client = None
 yazio_token: Optional[dict] = None
+
+
+# ============================================
+# PYDANTIC MODELS
+# ============================================
+
+class NoteCreate(BaseModel):
+    note: str
+    course: Optional[str] = "General"
+
+class NoteToggle(BaseModel):
+    done: bool
+
+
+# ============================================
+# NOTION HELPER
+# ============================================
+
+def get_notion_headers() -> dict:
+    """Return headers for Notion API calls."""
+    token = os.getenv("NOTION_TOKEN")
+    if not token:
+        raise HTTPException(status_code=500, detail="NOTION_TOKEN not configured")
+    return {
+        "Authorization": f"Bearer {token}",
+        "Notion-Version": NOTION_VERSION,
+        "Content-Type": "application/json",
+    }
 
 
 # ============================================
@@ -303,12 +336,14 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "4.1.0",
+        "version": "4.3.0",
         "timestamp": datetime.now().isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
             "yazio_credentials_set": bool(YAZIO_EMAIL and YAZIO_PASSWORD),
             "yazio_client_set": bool(YAZIO_CLIENT_ID),
+            "notion_token_set": bool(os.getenv("NOTION_TOKEN")),
+            "notes_db_set": bool(os.getenv("NOTES_DB_ID")),
         }
     }
 
@@ -505,13 +540,6 @@ async def get_food_items(date_str: Optional[str] = None):
             # =============================================
             # CRITICAL FIX: Nutrients are PER GRAM
             # =============================================
-            # YAZIO's /products endpoint returns nutrient values PER GRAM.
-            # Example: chicken has energy.energy = 1.06 (kcal per gram)
-            # To get total for portion: multiply by amount in grams
-            # 
-            # WRONG (old code): factor = amount / 100; cal = raw * factor  
-            # RIGHT (fixed):    cal = raw * amount
-            # =============================================
             
             energy_per_g = nutrients.get("energy.energy", 0) or 0
             protein_per_g = nutrients.get("nutrient.protein", 0) or 0
@@ -541,7 +569,7 @@ async def get_food_items(date_str: Optional[str] = None):
             meal_map = {
                 "breakfast": "Breakfast",
                 "lunch": "Lunch",
-                "dinner": "Diner",  # Match Notion schema spelling
+                "dinner": "Diner",
                 "snack": "Snack"
             }
             meal = meal_map.get(consumed.get("daytime", ""), "Snack")
@@ -564,7 +592,6 @@ async def get_food_items(date_str: Optional[str] = None):
                     "serving": serving,
                     "serving_quantity": serving_quantity,
                 },
-                # Raw nutrients for debugging - these are PER GRAM values
                 "nutrients_raw": {
                     "energy": energy_per_g,
                     "protein": protein_per_g,
@@ -662,6 +689,122 @@ async def sleep_week_endpoint(days: int = 7):
             "total_days": len(hours),
         }
     }
+
+
+# ============================================
+# QUICK NOTES ENDPOINTS
+# ============================================
+
+@app.get("/notes/courses")
+async def get_note_courses():
+    """Fetch course options dynamically from the Notion DB schema."""
+    db_id = os.getenv("NOTES_DB_ID", "7a8948775f0043f4823d83c004951b93")
+    headers = get_notion_headers()
+
+    async with httpx.AsyncClient() as client:
+        r = await client.get(
+            f"{NOTION_BASE}/databases/{db_id}",
+            headers=headers, timeout=10
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        data = r.json()
+        course_prop = data.get("properties", {}).get("Course", {})
+        options = course_prop.get("select", {}).get("options", [])
+
+        courses = [{"name": o["name"], "color": o.get("color", "gray")} for o in options]
+        return {"courses": courses}
+
+
+@app.get("/notes")
+async def get_notes():
+    """Fetch all active (not done) notes, sorted by creation date."""
+    db_id = os.getenv("NOTES_DB_ID", "7a8948775f0043f4823d83c004951b93")
+    headers = get_notion_headers()
+
+    body = {
+        "sorts": [{"property": "Created", "direction": "descending"}],
+        "filter": {
+            "property": "Done",
+            "checkbox": {"equals": False}
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{NOTION_BASE}/databases/{db_id}/query",
+            headers=headers, json=body, timeout=10
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        data = r.json()
+        notes = []
+        for page in data.get("results", []):
+            props = page["properties"]
+            notes.append({
+                "id": page["id"],
+                "note": props["Note"]["title"][0]["plain_text"] if props["Note"]["title"] else "",
+                "course": props["Course"]["select"]["name"] if props["Course"].get("select") else "General",
+                "created": props["Created"]["created_time"],
+                "done": props["Done"]["checkbox"]
+            })
+
+        return {"notes": notes}
+
+
+@app.post("/notes")
+async def create_note(payload: NoteCreate):
+    """Create a new note in the Notion DB."""
+    db_id = os.getenv("NOTES_DB_ID", "7a8948775f0043f4823d83c004951b93")
+    headers = get_notion_headers()
+
+    body = {
+        "parent": {"database_id": db_id},
+        "properties": {
+            "Note": {"title": [{"text": {"content": payload.note}}]},
+            "Course": {"select": {"name": payload.course or "General"}},
+            "Done": {"checkbox": False}
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        r = await client.post(
+            f"{NOTION_BASE}/pages", headers=headers, json=body, timeout=10
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        page = r.json()
+        return {
+            "id": page["id"],
+            "note": payload.note,
+            "course": payload.course or "General",
+            "created": page["created_time"],
+            "done": False
+        }
+
+
+@app.patch("/notes/{note_id}")
+async def toggle_note(note_id: str, payload: NoteToggle):
+    """Mark a note as done/undone."""
+    headers = get_notion_headers()
+
+    body = {
+        "properties": {
+            "Done": {"checkbox": payload.done}
+        }
+    }
+
+    async with httpx.AsyncClient() as client:
+        r = await client.patch(
+            f"{NOTION_BASE}/pages/{note_id}", headers=headers, json=body, timeout=10
+        )
+        if r.status_code != 200:
+            raise HTTPException(status_code=r.status_code, detail=r.text)
+
+        return {"id": note_id, "done": payload.done}
 
 
 # ============================================
