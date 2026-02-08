@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Sleep Duration</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=IBM+Plex+Mono:wght@300;400;500;600&display=swap');
+  
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  
+  :root {
+    --bg: #000000;
+    --border: #1a1a1a;
+    --muted: #333;
+    --dim: #555;
+    --text: #e8e8e8;
+    --accent: #d13438;
+    --dot: #1a1a1a;
+    --radius: 16px;
+  }
+  
+  html, body {
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: transparent;
+    font-family: 'IBM Plex Mono', 'Space Mono', monospace;
+    color: var(--text);
+  }
+
+  .widget {
+    width: 100%;
+    height: 100%;
+    background: var(--bg);
+    border-radius: var(--radius);
+    overflow: hidden;
+    position: relative;
+    display: flex;
+    flex-direction: column;
+  }
+
+  .widget::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background-image: radial-gradient(circle, var(--dot) 1px, transparent 1px);
+    background-size: 20px 20px;
+    opacity: 0.4;
+    pointer-events: none;
+    border-radius: var(--radius);
+  }
+
+  .inner {
+    position: relative;
+    z-index: 1;
+    padding: 24px 24px 18px;
+    display: flex;
+    flex-direction: column;
+    height: 100%;
+    min-height: 0;
+  }
+
+  .header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    margin-bottom: 16px;
+    flex-shrink: 0;
+  }
+
+  .header-left {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+
+  .glyph {
+    width: 28px;
+    height: 28px;
+    border: 1.5px solid var(--accent);
+    border-radius: 50%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 13px;
+    color: var(--accent);
+    font-weight: 700;
+    flex-shrink: 0;
+  }
+
+  .header-text h1 {
+    font-size: 11px;
+    font-weight: 600;
+    letter-spacing: 3px;
+    text-transform: uppercase;
+    color: var(--text);
+    line-height: 1;
+  }
+
+  .header-text .period {
+    font-size: 8px;
+    font-weight: 400;
+    letter-spacing: 1.5px;
+    text-transform: uppercase;
+    color: var(--dim);
+    margin-top: 2px;
+  }
+
+  .live-dot {
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    animation: pulse 2s ease-in-out infinite;
+    flex-shrink: 0;
+  }
+
+  @keyframes pulse {
+    0%, 100% { opacity: 0.3; }
+    50% { opacity: 1; }
+  }
+
+  .sep {
+    height: 1px;
+    background: var(--border);
+    margin-bottom: 16px;
+    position: relative;
+    flex-shrink: 0;
+  }
+
+  .sep::after {
+    content: '///';
+    position: absolute;
+    right: 0;
+    top: -7px;
+    font-size: 8px;
+    color: var(--muted);
+    letter-spacing: 2px;
+  }
+
+  .chart-wrapper {
+    flex: 1 1 auto;
+    min-height: 0;
+    position: relative;
+  }
+
+  .chart-wrapper canvas { width:100%!important; height:100%!important; }
+
+  .stats {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    margin-top: 12px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .stat {
+    padding: 12px 0;
+    text-align: center;
+    position: relative;
+  }
+
+  .stat:not(:last-child)::after {
+    content: '';
+    position: absolute;
+    right: 0;
+    top: 12px;
+    bottom: 12px;
+    width: 1px;
+    background: var(--border);
+  }
+
+  .stat-val {
+    font-size: clamp(16px, 3.5vw, 22px);
+    font-weight: 700;
+    font-family: 'Space Mono', monospace;
+    line-height: 1;
+    color: var(--text);
+  }
+
+  .stat-val.accent { color: var(--accent); }
+  .stat-val.dim { color: var(--dim); }
+
+  .stat-lbl {
+    font-size: clamp(6px, 1.2vw, 7px);
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+    margin-top: 5px;
+    font-weight: 500;
+  }
+
+  .footer {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 10px;
+    padding-top: 10px;
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .footer span {
+    font-size: 7px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--muted);
+  }
+
+  .state-msg {
+    flex: 1;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 9px;
+    letter-spacing: 2px;
+    text-transform: uppercase;
+    color: var(--dim);
+  }
+  .state-msg.error { color: var(--accent); }
+  .dot-anim { animation: blink 1.4s infinite both; }
+  .dot-anim:nth-child(2) { animation-delay: 0.2s; }
+  .dot-anim:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes blink { 0%,80%,100%{opacity:.2} 40%{opacity:1} }
+</style>
+</head>
+<body>
+<div class="widget">
+  <div class="inner">
+    <div class="header">
+      <div class="header-left">
+        <div class="glyph">◑</div>
+        <div class="header-text">
+          <h1>Sleep Duration</h1>
+          <div class="period" id="period">Loading</div>
+        </div>
+      </div>
+      <div class="live-dot"></div>
+    </div>
+    <div class="sep"></div>
+
+    <div class="state-msg" id="loading">
+      Fetching Garmin<span class="dot-anim">.</span><span class="dot-anim">.</span><span class="dot-anim">.</span>
+    </div>
+
+    <div id="content" style="display:none; flex:1 1 auto; flex-direction:column; min-height:0;">
+      <div class="chart-wrapper">
+        <canvas id="lineChart"></canvas>
+      </div>
+
+      <div class="stats">
+        <div class="stat">
+          <div class="stat-val" id="s-mean">—</div>
+          <div class="stat-lbl">Mean</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val" id="s-peak">—</div>
+          <div class="stat-lbl">Peak</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val dim" id="s-low">—</div>
+          <div class="stat-lbl">Low</div>
+        </div>
+        <div class="stat">
+          <div class="stat-val accent" id="s-goal">—</div>
+          <div class="stat-lbl">Goal 7h</div>
+        </div>
+      </div>
+
+      <div class="footer">
+        <span>Garmin Connect</span>
+        <span>Health OS</span>
+      </div>
+    </div>
+
+    <div class="state-msg error" id="error" style="display:none;"></div>
+  </div>
+</div>
+
+<script>
+const API = 'https://web-production-8be9.up.railway.app';
+const GOAL = 7.0;
+const DAYS = ['Dim','Lun','Mar','Mer','Jeu','Ven','Sam'];
+let chart = null;
+
+function fmt(h) {
+  const hrs = Math.floor(h);
+  const mins = Math.round((h - hrs) * 60);
+  return `${hrs}h${String(mins).padStart(2,'0')}`;
+}
+
+async function load() {
+  try {
+    const r = await fetch(`${API}/sleep-week?days=7`);
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const json = await r.json();
+    if (json.error) throw new Error(json.error);
+    render(json);
+  } catch (e) {
+    document.getElementById('loading').style.display = 'none';
+    const el = document.getElementById('error');
+    el.style.display = 'flex';
+    el.textContent = e.message;
+  }
+}
+
+function render({ data, stats }) {
+  const labels = data.map(d => {
+    const dt = new Date(d.date + 'T12:00:00');
+    return `${DAYS[dt.getDay()]} ${String(dt.getDate()).padStart(2,'0')}`;
+  });
+  const durations = data.map(d => d.sleep_hours);
+
+  // Period
+  const first = data[0]?.date?.slice(5) || '';
+  const last = data[data.length-1]?.date?.slice(5) || '';
+  document.getElementById('period').textContent = `${first} → ${last}`;
+
+  // Stats
+  document.getElementById('s-mean').textContent = fmt(stats.avg_hours);
+  document.getElementById('s-peak').textContent = fmt(stats.max_hours);
+  document.getElementById('s-low').textContent = fmt(stats.min_hours);
+  document.getElementById('s-goal').textContent = `${stats.goal_met}/${stats.total_days}`;
+
+  // Show
+  document.getElementById('loading').style.display = 'none';
+  document.getElementById('content').style.display = 'flex';
+
+  if (chart) chart.destroy();
+
+  const goalLinePlugin = {
+    id: 'goalLine',
+    afterDraw(ch) {
+      const { ctx, chartArea, scales } = ch;
+      const y = scales.y.getPixelForValue(GOAL);
+      ctx.save();
+      ctx.strokeStyle = 'rgba(209,52,56,0.25)';
+      ctx.lineWidth = 1;
+      ctx.setLineDash([4,4]);
+      ctx.beginPath();
+      ctx.moveTo(chartArea.left, y);
+      ctx.lineTo(chartArea.right, y);
+      ctx.stroke();
+      ctx.fillStyle = 'rgba(209,52,56,0.4)';
+      ctx.font = '500 8px IBM Plex Mono';
+      ctx.textAlign = 'right';
+      ctx.fillText('7H GOAL', chartArea.right, y - 6);
+      ctx.restore();
+    }
+  };
+
+  const ctx = document.getElementById('lineChart').getContext('2d');
+  const rect = ctx.canvas.parentElement.getBoundingClientRect();
+  const gradient = ctx.createLinearGradient(0, 0, 0, rect.height || 260);
+  gradient.addColorStop(0, 'rgba(209,52,56,0.12)');
+  gradient.addColorStop(1, 'rgba(209,52,56,0)');
+
+  chart = new Chart(ctx, {
+    type: 'line',
+    data: {
+      labels,
+      datasets: [{
+        data: durations,
+        borderColor: 'rgba(209,52,56,0.8)',
+        borderWidth: 2,
+        backgroundColor: gradient,
+        fill: true,
+        tension: 0.35,
+        pointBackgroundColor: durations.map(d => d>=GOAL?'#e8e8e8':d>=6?'#d13438':'#333'),
+        pointBorderColor: durations.map(d => d>=GOAL?'#fff':d>=6?'#d13438':'#555'),
+        pointBorderWidth: 1.5,
+        pointRadius: 5,
+        pointHoverRadius: 7,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          backgroundColor: '#0a0a0a',
+          titleColor: '#555',
+          bodyColor: '#e8e8e8',
+          titleFont: { family:'IBM Plex Mono', size:9, weight:'400' },
+          bodyFont: { family:'Space Mono', size:14, weight:'700' },
+          borderColor: '#1a1a1a',
+          borderWidth: 1,
+          padding: { top:8, bottom:8, left:12, right:12 },
+          cornerRadius: 0,
+          displayColors: false,
+          callbacks: {
+            title: items => items[0].label.toUpperCase(),
+            label: item => fmt(item.raw),
+          }
+        }
+      },
+      scales: {
+        x: {
+          grid: { color:'rgba(255,255,255,0.03)', drawTicks:false },
+          ticks: {
+            color: '#444',
+            font: { family:'IBM Plex Mono', size:9, weight:'500' },
+            padding: 10,
+          },
+          border: { color:'#1a1a1a' },
+        },
+        y: {
+          min: 3, max: 10,
+          grid: { color:'rgba(255,255,255,0.03)', drawTicks:false },
+          ticks: {
+            stepSize: 1, color:'#333',
+            font: { family:'IBM Plex Mono', size:8 },
+            padding: 10,
+            callback: v => v+'h',
+          },
+          border: { display:false },
+        }
+      },
+      animation: { duration:1000, easing:'easeOutQuart' }
+    },
+    plugins: [goalLinePlugin]
+  });
+}
+
+load();
+setInterval(load, 15 * 60 * 1000);
+</script>
+</body>
+</html>
