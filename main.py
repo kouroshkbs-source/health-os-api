@@ -354,6 +354,14 @@ async def garmin_endpoint():
     return get_garmin_data()
 
 
+@app.get("/yazio")
+async def yazio_endpoint(date: Optional[str] = None):
+    """Get YAZIO nutrition data and goals."""
+    if not date:
+        date = datetime.now().strftime("%Y-%m-%d")
+    return await get_yazio_daily(date)
+
+
 @app.get("/sync")
 async def sync_endpoint(date: Optional[str] = None):
     """Combined sync endpoint - Garmin + YAZIO daily totals."""
