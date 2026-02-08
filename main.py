@@ -1,5 +1,5 @@
 """
-Health OS API v4.1.0 - Fixed macro calculation
+Health OS API v4.2.0 - Added /sleep-week endpoint for live charts
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + individual food items with full macros
 - FIX: YAZIO nutrients are PER GRAM, not per 100g
@@ -28,7 +28,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.1.0"
+    version="4.2.0"
 )
 
 # CORS for widget access
@@ -594,6 +594,74 @@ async def get_food_items(date_str: Optional[str] = None):
             "totals": totals,
             "totals_note": None,
         }
+
+
+# ============================================
+# SLEEP WEEK ENDPOINT (for live charts)
+# ============================================
+
+@app.get("/sleep-week")
+async def sleep_week_endpoint(days: int = 7):
+    """Returns sleep score and duration for the last N days (default 7).
+    Used by embedded Notion charts for real-time visualization."""
+    global garmin_client
+    
+    if not garmin_client:
+        garmin_client = init_garmin()
+    
+    if not garmin_client:
+        return {"error": "Garmin not connected", "data": []}
+    
+    today = date.today()
+    results = []
+    
+    for i in range(days - 1, -1, -1):  # oldest first
+        target = (today - timedelta(days=i)).isoformat()
+        entry = {
+            "date": target,
+            "sleep_score": 0,
+            "sleep_hours": 0.0,
+            "sleep_duration": "0h 00",
+        }
+        
+        try:
+            sleep_data = garmin_client.get_sleep_data(target)
+            if sleep_data and isinstance(sleep_data, dict):
+                daily_sleep = sleep_data.get("dailySleepDTO", {})
+                
+                # Duration
+                sleep_seconds = daily_sleep.get("sleepTimeSeconds", 0) or 0
+                if sleep_seconds > 0:
+                    hours = int(sleep_seconds // 3600)
+                    minutes = int((sleep_seconds % 3600) // 60)
+                    entry["sleep_duration"] = f"{hours}h {minutes:02d}"
+                    entry["sleep_hours"] = round(sleep_seconds / 3600, 2)
+                
+                # Score
+                entry["sleep_score"] = daily_sleep.get("sleepScores", {}).get("overall", {}).get("value", 0) or 0
+        except Exception as e:
+            logger.warning(f"Sleep data error for {target}: {e}")
+        
+        results.append(entry)
+    
+    # Compute stats
+    scores = [r["sleep_score"] for r in results if r["sleep_score"] > 0]
+    hours = [r["sleep_hours"] for r in results if r["sleep_hours"] > 0]
+    
+    return {
+        "days": days,
+        "data": results,
+        "stats": {
+            "avg_score": round(sum(scores) / len(scores), 1) if scores else 0,
+            "max_score": max(scores) if scores else 0,
+            "min_score": min(scores) if scores else 0,
+            "avg_hours": round(sum(hours) / len(hours), 2) if hours else 0,
+            "max_hours": round(max(hours), 2) if hours else 0,
+            "min_hours": round(min(hours), 2) if hours else 0,
+            "goal_met": sum(1 for h in hours if h >= 7),
+            "total_days": len(hours),
+        }
+    }
 
 
 # ============================================
