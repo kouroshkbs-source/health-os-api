@@ -284,7 +284,7 @@ async def get_yazio_daily(date_str: str) -> dict:
                 data = resp.json()
                 logger.info(f"YAZIO response keys: {list(data.keys())}")
                 
-                # Extract meals data
+                # Extract meals data (keys use dot notation: "energy.energy", "nutrient.protein", etc.)
                 meals = data.get("meals", {})
                 total_cal = 0
                 total_protein = 0
@@ -293,18 +293,18 @@ async def get_yazio_daily(date_str: str) -> dict:
                 
                 for meal_key, meal_data in meals.items():
                     if isinstance(meal_data, dict):
-                        nutritional_info = meal_data.get("nutritional_info", {})
-                        total_cal += nutritional_info.get("energy", {}).get("energy", 0) or 0
-                        total_protein += nutritional_info.get("nutrient", {}).get("protein", 0) or 0
-                        total_carbs += nutritional_info.get("nutrient", {}).get("carb", 0) or 0
-                        total_fat += nutritional_info.get("nutrient", {}).get("fat", 0) or 0
+                        nutrients = meal_data.get("nutrients", {})
+                        total_cal += nutrients.get("energy.energy", 0) or 0
+                        total_protein += nutrients.get("nutrient.protein", 0) or 0
+                        total_carbs += nutrients.get("nutrient.carb", 0) or 0
+                        total_fat += nutrients.get("nutrient.fat", 0) or 0
                 
-                # Extract goals
+                # Extract goals (keys use dot notation: "energy.energy", "nutrient.protein", etc.)
                 goals = data.get("goals", {})
-                cal_goal = goals.get("energy", 0) or 0
-                protein_goal = goals.get("protein", 0) or 0
-                carbs_goal = goals.get("carb", 0) or 0
-                fat_goal = goals.get("fat", 0) or 0
+                cal_goal = goals.get("energy.energy", 0) or 0
+                protein_goal = goals.get("nutrient.protein", 0) or 0
+                carbs_goal = goals.get("nutrient.carb", 0) or 0
+                fat_goal = goals.get("nutrient.fat", 0) or 0
                 
                 logger.info(f"YAZIO: {round(total_cal)}/{cal_goal} kcal, P:{round(total_protein)}g, C:{round(total_carbs)}g, F:{round(total_fat)}g")
                 
