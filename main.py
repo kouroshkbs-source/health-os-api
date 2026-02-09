@@ -819,6 +819,26 @@ async def toggle_note(note_id: str, payload: NoteToggle):
 # DEBUG ENDPOINTS
 # ============================================
 
+@app.get("/debug-daily-summary")
+async def debug_daily_summary(date_str: Optional[str] = None):
+    """Raw daily-summary from YAZIO (for debugging structure changes)."""
+    if not date_str:
+        date_str = datetime.now().strftime("%Y-%m-%d")
+    
+    token = await yazio_login()
+    if not token:
+        return {"error": "No YAZIO token"}
+    
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+    
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        resp = await client.get(
+            f"{YAZIO_BASE_URL}/user/widgets/daily-summary?date={date_str}",
+            headers=headers
+        )
+        return resp.json()
+
+
 @app.get("/debug-consumed-items")
 async def debug_consumed_items(date_str: Optional[str] = None):
     """Raw consumed items from YAZIO (for debugging)."""
