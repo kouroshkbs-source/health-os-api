@@ -1520,6 +1520,47 @@ async def debug_stress(date_str: Optional[str] = None):
     return result
 
 
+@app.get("/debug-garmin-sleep")
+async def debug_sleep(date_str: Optional[str] = None):
+    """Raw sleep data — shows ALL field names and timestamp values."""
+    global garmin_client
+    if not garmin_client:
+        garmin_client = init_garmin()
+    if not garmin_client:
+        return {"error": "Garmin not connected"}
+
+    if not date_str:
+        date_str = date.today().isoformat()
+
+    result = {}
+
+    try:
+        sleep_data = garmin_client.get_sleep_data(date_str)
+        if sleep_data and isinstance(sleep_data, dict):
+            daily = sleep_data.get("dailySleepDTO", {})
+            # Return ALL keys and values from dailySleepDTO (except huge arrays)
+            result["dailySleepDTO_keys"] = list(daily.keys())
+            # Extract all timestamp-related fields
+            result["timestamp_fields"] = {
+                k: v for k, v in daily.items()
+                if "timestamp" in k.lower() or "time" in k.lower() or "start" in k.lower() or "end" in k.lower()
+            }
+            # Also grab sleep seconds for reference
+            result["sleep_seconds"] = daily.get("sleepTimeSeconds")
+            result["sleep_start_fields"] = {
+                k: v for k, v in daily.items()
+                if "start" in k.lower() or "begin" in k.lower() or "bed" in k.lower()
+            }
+            result["sleep_end_fields"] = {
+                k: v for k, v in daily.items()
+                if "end" in k.lower() or "wake" in k.lower()
+            }
+    except Exception as e:
+        result["sleep_error"] = str(e)
+
+    return result
+
+
 # ============================================
 # RUN SERVER
 # ============================================
