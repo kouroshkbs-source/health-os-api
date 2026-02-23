@@ -1414,6 +1414,45 @@ async def debug_product(product_id: str):
 
 
 # ============================================
+# DEBUG GARMIN RAW DATA
+# ============================================
+
+@app.get("/debug-garmin-stress")
+async def debug_stress(date_str: Optional[str] = None):
+    """Raw stress + HR data from Garmin to find correct keys."""
+    global garmin_client
+    if not garmin_client:
+        garmin_client = init_garmin()
+    if not garmin_client:
+        return {"error": "Garmin not connected"}
+
+    if not date_str:
+        date_str = date.today().isoformat()
+
+    result = {}
+
+    try:
+        stress = garmin_client.get_stress_data(date_str)
+        result["stress_raw"] = stress
+        result["stress_type"] = str(type(stress))
+        if isinstance(stress, dict):
+            result["stress_keys"] = list(stress.keys())
+    except Exception as e:
+        result["stress_error"] = str(e)
+
+    try:
+        hr = garmin_client.get_heart_rates(date_str)
+        result["hr_raw"] = hr
+        result["hr_type"] = str(type(hr))
+        if isinstance(hr, dict):
+            result["hr_keys"] = list(hr.keys())
+    except Exception as e:
+        result["hr_error"] = str(e)
+
+    return result
+
+
+# ============================================
 # RUN SERVER
 # ============================================
 
