@@ -839,7 +839,7 @@ async def health_metrics_endpoint(days: int = 14):
             try:
                 stress = garmin_client.get_stress_data(target)
                 if stress and isinstance(stress, dict):
-                    entry["stress_avg"] = stress.get("overallStressLevel") or None
+                    entry["stress_avg"] = stress.get("avgStressLevel") or None
             except Exception as e:
                 logger.warning(f"Metrics stress error {target}: {e}")
 
@@ -1033,7 +1033,7 @@ async def coach_analysis(days: int = 7, detail: str = "full"):
             try:
                 stress = garmin_client.get_stress_data(target)
                 if stress and isinstance(stress, dict):
-                    day_data["stress_avg"] = stress.get("overallStressLevel")
+                    day_data["stress_avg"] = stress.get("avgStressLevel")
                     day_data["stress_max"] = stress.get("maxStressLevel")
                     day_data["high_stress_min"] = round((stress.get("highStressDuration", 0) or 0) / 60, 0)
             except Exception as e:
