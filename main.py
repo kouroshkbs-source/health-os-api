@@ -1,8 +1,9 @@
 """
-Health OS API v4.3.0 - Added Quick Notes endpoints
+Health OS API v4.4.0 - Added Sleep Stages endpoint
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + individual food items with full macros
 - Quick Notes: CRUD for Notion-backed notes widget
+- Sleep Stages: Breakdown by cycle (deep, light, REM, awake)
 - FIX: YAZIO nutrients are PER GRAM, not per 100g
 
 Deploy on Railway
@@ -29,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.3.0"
+    version="4.4.0"
 )
 
 # CORS for widget access
@@ -336,7 +337,7 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "4.3.0",
+        "version": "4.4.0",
         "timestamp": datetime.now().isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
@@ -695,6 +696,80 @@ async def sleep_week_endpoint(days: int = 7):
             "min_hours": round(min(hours), 2) if hours else 0,
             "goal_met": sum(1 for h in hours if h >= 7),
             "total_days": len(hours),
+        }
+    }
+
+
+# ============================================
+# SLEEP STAGES ENDPOINT (for cycle breakdown chart)
+# ============================================
+
+@app.get("/sleep-stages")
+async def get_sleep_stages(days: int = 7):
+    """Return sleep stage breakdown (deep, light, REM, awake) for the last N days.
+    Used by the Sleep Stages line chart widget."""
+    global garmin_client
+    
+    if not garmin_client:
+        garmin_client = init_garmin()
+    
+    if not garmin_client:
+        return {"error": "Garmin not connected", "data": []}
+    
+    today = date.today()
+    results = []
+    
+    for i in range(days - 1, -1, -1):  # oldest first
+        target = (today - timedelta(days=i)).isoformat()
+        entry = {
+            "date": target,
+            "deep": 0.0,
+            "light": 0.0,
+            "rem": 0.0,
+            "awake": 0.0,
+            "total": 0.0,
+        }
+        
+        try:
+            sleep_data = garmin_client.get_sleep_data(target)
+            if sleep_data and isinstance(sleep_data, dict):
+                daily = sleep_data.get("dailySleepDTO", {})
+                
+                deep_s = daily.get("deepSleepSeconds", 0) or 0
+                light_s = daily.get("lightSleepSeconds", 0) or 0
+                rem_s = daily.get("remSleepSeconds", 0) or 0
+                awake_s = daily.get("awakeSleepSeconds", 0) or 0
+                total_s = deep_s + light_s + rem_s
+                
+                entry["deep"] = round(deep_s / 3600, 2)
+                entry["light"] = round(light_s / 3600, 2)
+                entry["rem"] = round(rem_s / 3600, 2)
+                entry["awake"] = round(awake_s / 3600, 2)
+                entry["total"] = round(total_s / 3600, 2)
+        except Exception as e:
+            logger.warning(f"Sleep stages error for {target}: {e}")
+        
+        results.append(entry)
+    
+    # Compute stats per stage
+    def stage_stats(key):
+        vals = [r[key] for r in results if r[key] > 0]
+        if not vals:
+            return {"avg": 0, "max": 0, "min": 0}
+        return {
+            "avg": round(sum(vals) / len(vals), 2),
+            "max": round(max(vals), 2),
+            "min": round(min(vals), 2),
+        }
+    
+    return {
+        "days": days,
+        "data": results,
+        "stats": {
+            "deep": stage_stats("deep"),
+            "light": stage_stats("light"),
+            "rem": stage_stats("rem"),
+            "awake": stage_stats("awake"),
         }
     }
 
