@@ -1,10 +1,11 @@
 """
-Health OS API v4.5.0 - Added Sleep Stages + Correlation Explorer
+Health OS API v4.6.0 - Added Correlation Explorer + AI Interpretation
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + individual food items with full macros
 - Quick Notes: CRUD for Notion-backed notes widget
 - Sleep Stages: Breakdown by cycle (deep, light, REM, awake)
 - Health Metrics: All metrics aggregated for correlation analysis
+- Interpret: Claude AI-powered health correlation interpretation
 - FIX: YAZIO nutrients are PER GRAM, not per 100g
 
 Deploy on Railway
@@ -31,7 +32,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.5.0"
+    version="4.6.0"
 )
 
 # CORS for widget access
@@ -338,7 +339,7 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "4.5.0",
+        "version": "4.6.0",
         "timestamp": datetime.now().isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
@@ -880,6 +881,87 @@ async def health_metrics_endpoint(days: int = 14):
         "data": results,
         "metrics": available,
     }
+
+
+# ============================================
+# INTERPRET ENDPOINT (Claude AI analysis)
+# ============================================
+
+class InterpretRequest(BaseModel):
+    question: str
+    x_label: str
+    y_label: str
+    x_unit: str
+    y_unit: str
+    r: float
+    strength: str
+    data_points: int
+    x_avg: float
+    y_avg: float
+    x_min: float
+    x_max: float
+    y_min: float
+    y_max: float
+    trend: str
+    days: int
+
+
+@app.post("/interpret")
+async def interpret_correlation(req: InterpretRequest):
+    """Use Claude to interpret a health correlation and give advice."""
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"interpretation": "AI interpretation not configured. Add ANTHROPIC_API_KEY to Railway."}
+
+    prompt = f"""Tu es un coach santé intégré dans un dashboard personnel. L'utilisateur est Kourosh, un étudiant en master qui s'entraîne pour un 20km et suit sa santé via Garmin + YAZIO.
+
+Il vient de regarder la corrélation entre deux métriques de santé sur ses {req.days} derniers jours. Voici les données :
+
+QUESTION POSÉE : "{req.question}"
+
+MÉTRIQUES :
+- Axe X : {req.x_label} (moyenne: {req.x_avg}{req.x_unit}, range: {req.x_min}–{req.x_max}{req.x_unit})
+- Axe Y : {req.y_label} (moyenne: {req.y_avg}{req.y_unit}, range: {req.y_min}–{req.y_max}{req.y_unit})
+
+RÉSULTAT :
+- Coefficient de Pearson r = {req.r:.2f} ({req.strength})
+- Tendance : {req.trend}
+- Points de données : {req.data_points} jours
+
+INSTRUCTIONS :
+1. Réponds en 2-3 phrases MAX. Sois direct et concret.
+2. PREMIÈRE phrase : interprète la corrélation en langage simple (pas de jargon statistique).
+3. DEUXIÈME phrase : donne un CONSEIL ACTIONNABLE et spécifique basé sur les chiffres. Utilise les vrais chiffres (moyennes, seuils) pour rendre le conseil concret.
+4. Si la corrélation est faible ou inexistante, dis-le clairement et suggère une autre piste à explorer.
+5. Adapte le ton : coach bienveillant mais direct, tutoie, pas de blabla.
+6. Réponds en français.
+7. N'utilise PAS de bullet points ni de listes. Juste du texte fluide."""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 250,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                text = data["content"][0]["text"]
+                return {"interpretation": text}
+            else:
+                logger.error(f"Claude API error: {resp.status_code} {resp.text}")
+                return {"interpretation": f"Erreur API ({resp.status_code}). Vérifie ta clé ANTHROPIC_API_KEY."}
+    except Exception as e:
+        logger.error(f"Interpret error: {e}")
+        return {"interpretation": f"Erreur: {str(e)}"}
 
 
 # ============================================
