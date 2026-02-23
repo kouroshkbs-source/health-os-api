@@ -1,12 +1,11 @@
 """
-Health OS API v4.6.0 - Added Correlation Explorer + AI Interpretation
-- Garmin: Token-based authentication (generate tokens locally first)
-- YAZIO: OAuth v15 for auth + individual food items with full macros
+Health OS API v4.7.0 - Added AI Health Coach
+- Garmin: Full metrics (sleep, stress, HRV, body battery, steps, intensity, SpO2, respiration, training readiness)
+- YAZIO: Detailed food items with ALL nutrients (fiber, sugar, vitamins, minerals)
+- Coach: Claude AI-powered full health analysis with nutrition coaching
+- Interpret: Claude AI correlation interpretation
+- Sleep Stages: Breakdown by cycle
 - Quick Notes: CRUD for Notion-backed notes widget
-- Sleep Stages: Breakdown by cycle (deep, light, REM, awake)
-- Health Metrics: All metrics aggregated for correlation analysis
-- Interpret: Claude AI-powered health correlation interpretation
-- FIX: YAZIO nutrients are PER GRAM, not per 100g
 
 Deploy on Railway
 """
@@ -32,7 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.6.0"
+    version="4.7.0"
 )
 
 # CORS for widget access
@@ -339,7 +338,7 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "4.6.0",
+        "version": "4.7.0",
         "timestamp": datetime.now().isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
@@ -603,12 +602,7 @@ async def get_food_items(date_str: Optional[str] = None):
                     "serving": serving,
                     "serving_quantity": serving_quantity,
                 },
-                "nutrients_raw": {
-                    "energy": energy_per_g,
-                    "protein": protein_per_g,
-                    "carbs": carbs_per_g,
-                    "fat": fat_per_g,
-                },
+                "nutrients_raw": nutrients,  # ALL nutrient keys from YAZIO
                 "nutrient_basis": "per_gram",
             }
             
@@ -962,6 +956,259 @@ INSTRUCTIONS :
     except Exception as e:
         logger.error(f"Interpret error: {e}")
         return {"interpretation": f"Erreur: {str(e)}"}
+
+
+# ============================================
+# COACH ENDPOINT (Full AI Health Coach)
+# ============================================
+
+@app.get("/coach")
+async def coach_analysis(days: int = 7, detail: str = "full"):
+    """Full AI health coach — gathers ALL Garmin + YAZIO data, sends to Claude."""
+    global garmin_client
+    api_key = os.getenv("ANTHROPIC_API_KEY")
+    if not api_key:
+        return {"analysis": "AI not configured. Add ANTHROPIC_API_KEY to Railway."}
+
+    if not garmin_client:
+        garmin_client = init_garmin()
+
+    today = date.today()
+    garmin_days = []
+    activities_list = []
+    training_status = None
+    vo2_max_val = None
+
+    for i in range(days - 1, -1, -1):
+        target = (today - timedelta(days=i)).isoformat()
+        day_data = {"date": target}
+
+        if garmin_client:
+            # Sleep
+            try:
+                sleep = garmin_client.get_sleep_data(target)
+                if sleep and isinstance(sleep, dict):
+                    d = sleep.get("dailySleepDTO", {})
+                    day_data["sleep_hours"] = round((d.get("sleepTimeSeconds", 0) or 0) / 3600, 2)
+                    day_data["sleep_score"] = d.get("sleepScores", {}).get("overall", {}).get("value")
+                    day_data["deep_sleep_h"] = round((d.get("deepSleepSeconds", 0) or 0) / 3600, 2)
+                    day_data["rem_sleep_h"] = round((d.get("remSleepSeconds", 0) or 0) / 3600, 2)
+                    day_data["light_sleep_h"] = round((d.get("lightSleepSeconds", 0) or 0) / 3600, 2)
+                    day_data["resting_hr"] = d.get("restingHeartRate")
+            except Exception as e:
+                logger.warning(f"Coach sleep {target}: {e}")
+
+            # Stress
+            try:
+                stress = garmin_client.get_stress_data(target)
+                if stress and isinstance(stress, dict):
+                    day_data["stress_avg"] = stress.get("overallStressLevel")
+                    day_data["stress_max"] = stress.get("maxStressLevel")
+                    day_data["high_stress_min"] = round((stress.get("highStressDuration", 0) or 0) / 60, 0)
+            except Exception as e:
+                logger.warning(f"Coach stress {target}: {e}")
+
+            # HRV
+            try:
+                hrv = garmin_client.get_hrv_data(target)
+                if hrv and isinstance(hrv, dict):
+                    s = hrv.get("hrvSummary", {})
+                    day_data["hrv_overnight"] = s.get("lastNightAvg")
+                    day_data["hrv_status"] = s.get("status")
+            except Exception as e:
+                logger.warning(f"Coach HRV {target}: {e}")
+
+            # Body Battery
+            try:
+                bb = garmin_client.get_body_battery(target)
+                if bb and isinstance(bb, list) and len(bb) > 0:
+                    vals = [it.get("chargedValue", 0) or it.get("charged", 0) or 0
+                            for it in bb if isinstance(it, dict)]
+                    day_data["body_battery_max"] = max(vals) if vals else None
+            except Exception as e:
+                logger.warning(f"Coach BB {target}: {e}")
+
+            # Steps
+            try:
+                steps = garmin_client.get_daily_steps(target, target)
+                if steps and isinstance(steps, list) and len(steps) > 0:
+                    day_data["steps"] = steps[0].get("totalSteps")
+            except Exception as e:
+                logger.warning(f"Coach steps {target}: {e}")
+
+            # Intensity Minutes
+            try:
+                im = garmin_client.get_intensity_minutes_data(target)
+                if im and isinstance(im, dict):
+                    day_data["moderate_min"] = im.get("moderateIntensityMinutes")
+                    day_data["vigorous_min"] = im.get("vigorousIntensityMinutes")
+            except Exception as e:
+                logger.warning(f"Coach IM {target}: {e}")
+
+            # Respiration
+            try:
+                resp_data = garmin_client.get_respiration_data(target)
+                if resp_data and isinstance(resp_data, dict):
+                    day_data["sleep_respiration"] = resp_data.get("avgSleepRespirationValue")
+            except Exception as e:
+                logger.warning(f"Coach resp {target}: {e}")
+
+            # SpO2
+            try:
+                spo2 = garmin_client.get_spo2_data(target)
+                if spo2 and isinstance(spo2, dict):
+                    day_data["avg_spo2"] = spo2.get("averageSpo2")
+            except Exception as e:
+                logger.warning(f"Coach SpO2 {target}: {e}")
+
+            # Training Readiness
+            try:
+                tr = garmin_client.get_training_readiness(target)
+                if tr and isinstance(tr, (dict, list)):
+                    if isinstance(tr, list) and len(tr) > 0:
+                        tr = tr[0]
+                    if isinstance(tr, dict):
+                        day_data["training_readiness"] = tr.get("score") or tr.get("trainingReadinessScore")
+            except Exception as e:
+                logger.warning(f"Coach TR {target}: {e}")
+
+        garmin_days.append(day_data)
+
+    # Activities
+    if garmin_client:
+        try:
+            start_d = (today - timedelta(days=days - 1)).isoformat()
+            acts = garmin_client.get_activities_by_date(start_d, today.isoformat())
+            if acts and isinstance(acts, list):
+                for a in acts[:15]:
+                    activities_list.append({
+                        "date": a.get("startTimeLocal", "")[:10],
+                        "type": a.get("activityType", {}).get("typeKey", "unknown"),
+                        "name": a.get("activityName", ""),
+                        "duration_min": round((a.get("duration", 0) or 0) / 60, 1),
+                        "distance_km": round((a.get("distance", 0) or 0) / 1000, 2),
+                        "avg_hr": a.get("averageHR"),
+                        "calories": a.get("calories"),
+                    })
+        except Exception as e:
+            logger.warning(f"Coach activities: {e}")
+
+        try:
+            ts = garmin_client.get_training_status(today.isoformat())
+            if ts and isinstance(ts, (dict, list)):
+                if isinstance(ts, list) and len(ts) > 0:
+                    ts = ts[0]
+                if isinstance(ts, dict):
+                    training_status = ts.get("trainingStatus") or ts.get("trainingStatusPhrase")
+                    vo2_max_val = ts.get("vo2MaxPreciseValue") or ts.get("vo2MaxValue")
+        except Exception as e:
+            logger.warning(f"Coach TS: {e}")
+
+    # ─── YAZIO detailed food (last 3 days) ───
+    food_by_day = {}
+    for i in range(min(days, 3) - 1, -1, -1):
+        target = (today - timedelta(days=i)).isoformat()
+        try:
+            food_data = await get_food_items(target)
+            if food_data and not food_data.get("error"):
+                meals_summary = {}
+                for item in food_data.get("items", []):
+                    meal = item.get("meal", "Snack")
+                    if meal not in meals_summary:
+                        meals_summary[meal] = []
+
+                    food_entry = {
+                        "name": item.get("name", "Unknown"),
+                        "amount": item.get("reference", ""),
+                        "cal": item.get("calories", 0),
+                        "prot": item.get("protein", 0),
+                        "carbs": item.get("carbs", 0),
+                        "fat": item.get("fat", 0),
+                    }
+                    # Extract ALL extra nutrients
+                    raw = item.get("nutrients_raw", {})
+                    amount = item.get("amount", 0)
+                    if raw and amount > 0:
+                        for key, val in raw.items():
+                            if key not in ("energy.energy", "nutrient.protein", "nutrient.carb", "nutrient.fat") and val and val > 0:
+                                clean_key = key.replace("nutrient.", "").replace("energy.", "")
+                                food_entry[clean_key] = round(val * amount, 2)
+
+                    meals_summary[meal].append(food_entry)
+                food_by_day[target] = {
+                    "meals": meals_summary,
+                    "totals": food_data.get("totals", {}),
+                }
+        except Exception as e:
+            logger.warning(f"Coach food {target}: {e}")
+
+    # ─── Build briefing & call Claude ───
+    briefing = json.dumps({
+        "period": f"{days}d ({(today - timedelta(days=days-1)).isoformat()} → {today.isoformat()})",
+        "garmin": garmin_days,
+        "activities": activities_list,
+        "training_status": training_status,
+        "vo2_max": vo2_max_val,
+        "food_detail": food_by_day,
+    }, ensure_ascii=False)
+
+    if len(briefing) > 12000:
+        briefing = briefing[:12000] + "...[truncated]"
+
+    prompt = f"""Tu es un coach santé et nutrition personnel intégré dans le dashboard "Health OS" de Kourosh.
+
+PROFIL : Kourosh, étudiant en master (UCLouvain), s'entraîne pour un 20km à Bruxelles, suit sa santé via Garmin + YAZIO.
+
+DONNÉES COMPLÈTES :
+{briefing}
+
+ANALYSE DEMANDÉE :
+
+1. BILAN FLASH (2 phrases) : état général, tendance.
+
+2. PATTERNS CLÉS : liens entre stress/sommeil/récupération/activité. Utilise les vrais chiffres.
+
+3. NUTRITION DÉTAILLÉE — regarde les aliments EXACTS :
+   - Quels nutriments manquent ? (fibres, fer, magnésium, omega-3, vitamines, etc.)
+   - Répartition des repas (protéines le soir ? assez de fibres ? trop de sucres ?)
+   - Aliments spécifiques à ajouter ou réduire, avec des suggestions concrètes
+
+4. Trois CONSEILS numérotés, ultra-concrets, basés sur les données réelles.
+
+CONTRAINTES : tutoie, sois direct et bienveillant, utilise les VRAIS chiffres, max 350 mots, réponds en français."""
+
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            resp = await client.post(
+                "https://api.anthropic.com/v1/messages",
+                headers={
+                    "x-api-key": api_key,
+                    "anthropic-version": "2023-06-01",
+                    "content-type": "application/json",
+                },
+                json={
+                    "model": "claude-sonnet-4-20250514",
+                    "max_tokens": 1000,
+                    "messages": [{"role": "user", "content": prompt}],
+                },
+            )
+            if resp.status_code == 200:
+                result = resp.json()
+                text = result["content"][0]["text"]
+                return {
+                    "analysis": text,
+                    "meta": {
+                        "days": days,
+                        "activities": len(activities_list),
+                        "food_days": len(food_by_day),
+                        "training_status": training_status,
+                        "vo2_max": vo2_max_val,
+                    }
+                }
+            else:
+                return {"analysis": f"Erreur Claude ({resp.status_code})"}
+    except Exception as e:
+        return {"analysis": f"Erreur: {str(e)}"}
 
 
 # ============================================
