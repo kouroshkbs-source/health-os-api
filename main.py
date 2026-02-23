@@ -1,11 +1,10 @@
 """
-Health OS API v4.7.0 - Added AI Health Coach
-- Garmin: Full metrics (sleep, stress, HRV, body battery, steps, intensity, SpO2, respiration, training readiness)
-- YAZIO: Detailed food items with ALL nutrients (fiber, sugar, vitamins, minerals)
-- Coach: Claude AI-powered full health analysis with nutrition coaching
-- Interpret: Claude AI correlation interpretation
-- Sleep Stages: Breakdown by cycle
-- Quick Notes: CRUD for Notion-backed notes widget
+Health OS API v4.8.0 - Bedtime/Wake + Nutrition-aware AI
+- Added: bedtime & waketime metrics (decimal hours) from Garmin sleep timestamps
+- Added: /food-summary endpoint for lightweight nutrition context
+- Fixed: stress key (avgStressLevel instead of overallStressLevel)
+- Interpret: now receives food context when nutrition metrics are selected
+- Coach: Full Claude AI health analysis with detailed nutrition coaching
 
 Deploy on Railway
 """
@@ -31,7 +30,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.7.1"
+    version="4.8.0"
 )
 
 # CORS for widget access
@@ -810,6 +809,34 @@ async def health_metrics_endpoint(days: int = 14):
                     entry["rem_sleep"] = round(rem_s / 3600, 2) if rem_s else None
                     entry["awake_time"] = round(awake_s / 3600, 2) if awake_s else None
                     entry["resting_hr"] = daily.get("restingHeartRate") or None
+
+                    # Bedtime & wake time (decimal hours, e.g. 23.5 = 23h30)
+                    sleep_start = daily.get("sleepStartTimestampLocal")
+                    sleep_end = daily.get("sleepEndTimestampLocal")
+                    if sleep_start:
+                        try:
+                            # Garmin gives millisecond timestamps
+                            if isinstance(sleep_start, (int, float)) and sleep_start > 1e10:
+                                from datetime import timezone
+                                dt = datetime.fromtimestamp(sleep_start / 1000)
+                            else:
+                                dt = datetime.fromisoformat(str(sleep_start))
+                            bedtime = dt.hour + dt.minute / 60
+                            # Shift: if before 18h, treat as after-midnight (add 24)
+                            if bedtime < 18:
+                                bedtime += 24
+                            entry["bedtime"] = round(bedtime, 2)
+                        except Exception:
+                            pass
+                    if sleep_end:
+                        try:
+                            if isinstance(sleep_end, (int, float)) and sleep_end > 1e10:
+                                dt = datetime.fromtimestamp(sleep_end / 1000)
+                            else:
+                                dt = datetime.fromisoformat(str(sleep_end))
+                            entry["waketime"] = round(dt.hour + dt.minute / 60, 2)
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.warning(f"Metrics sleep error {target}: {e}")
 
@@ -899,6 +926,8 @@ async def health_metrics_endpoint(days: int = 14):
         "stress_avg": {"label": "Stress moyen", "unit": "", "color": "#ef4444"},
         "hrv_overnight": {"label": "HRV nocturne", "unit": "ms", "color": "#06b6d4"},
         "training_readiness": {"label": "Training Readiness", "unit": "", "color": "#8b5cf6"},
+        "bedtime": {"label": "Heure coucher", "unit": "h", "color": "#6366f1"},
+        "waketime": {"label": "Heure réveil", "unit": "h", "color": "#f59e0b"},
     }
 
     return {
@@ -929,6 +958,7 @@ class InterpretRequest(BaseModel):
     y_max: float
     trend: str
     days: int
+    food_context: Optional[str] = None
 
 
 @app.post("/interpret")
@@ -937,6 +967,14 @@ async def interpret_correlation(req: InterpretRequest):
     api_key = os.getenv("ANTHROPIC_API_KEY")
     if not api_key:
         return {"interpretation": "AI interpretation not configured. Add ANTHROPIC_API_KEY to Railway."}
+
+    food_section = ""
+    if req.food_context:
+        food_section = f"""
+
+CONTEXTE NUTRITION (aliments récents) :
+{req.food_context}
+→ Utilise ces détails pour donner un conseil précis sur QUELS aliments ajuster."""
 
     prompt = f"""Tu es un coach santé intégré dans un dashboard personnel. L'utilisateur est Kourosh, un étudiant en master qui s'entraîne pour un 20km et suit sa santé via Garmin + YAZIO.
 
@@ -951,7 +989,7 @@ MÉTRIQUES :
 RÉSULTAT :
 - Coefficient de Pearson r = {req.r:.2f} ({req.strength})
 - Tendance : {req.trend}
-- Points de données : {req.data_points} jours
+- Points de données : {req.data_points} jours{food_section}
 
 INSTRUCTIONS :
 1. Réponds en 2-3 phrases MAX. Sois direct et concret.
@@ -960,7 +998,8 @@ INSTRUCTIONS :
 4. Si la corrélation est faible ou inexistante, dis-le clairement et suggère une autre piste à explorer.
 5. Adapte le ton : coach bienveillant mais direct, tutoie, pas de blabla.
 6. Réponds en français.
-7. N'utilise PAS de bullet points ni de listes. Juste du texte fluide."""
+7. N'utilise PAS de bullet points ni de listes. Juste du texte fluide.
+8. Pour les heures de coucher/réveil : les valeurs sont en heures décimales (ex: 23.5 = 23h30, 25.0 = 1h00 du matin)."""
 
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
@@ -1240,6 +1279,35 @@ CONTRAINTES : tutoie, sois direct et bienveillant, utilise les VRAIS chiffres, m
                 return {"analysis": f"Erreur Claude ({resp.status_code})"}
     except Exception as e:
         return {"analysis": f"Erreur: {str(e)}"}
+
+
+# ============================================
+# FOOD SUMMARY (lightweight, for interpret context)
+# ============================================
+
+@app.get("/food-summary")
+async def food_summary(days: int = 3):
+    """Returns a compact text summary of recent food items for AI context."""
+    today = date.today()
+    lines = []
+    for i in range(days - 1, -1, -1):
+        target = (today - timedelta(days=i)).isoformat()
+        try:
+            food = await get_food_items(target)
+            if food and not food.get("error") and food.get("items"):
+                day_items = []
+                for item in food["items"]:
+                    name = item.get("name", "?")
+                    ref = item.get("reference", "")
+                    cal = item.get("calories", 0)
+                    meal = item.get("meal", "")
+                    day_items.append(f"{meal}: {name} ({ref}, {round(cal)}kcal)")
+                totals = food.get("totals", {})
+                lines.append(f"{target}: {totals.get('calories',0)}kcal, P:{totals.get('protein',0)}g, C:{totals.get('carbs',0)}g, F:{totals.get('fat',0)}g")
+                lines.append("  " + " | ".join(day_items[:8]))  # max 8 items per day
+        except Exception as e:
+            logger.warning(f"Food summary {target}: {e}")
+    return {"summary": "\n".join(lines) if lines else None, "days": days}
 
 
 # ============================================
