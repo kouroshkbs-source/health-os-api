@@ -31,7 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.7.0"
+    version="4.7.1"
 )
 
 # CORS for widget access
@@ -835,6 +835,34 @@ async def health_metrics_endpoint(days: int = 14):
             except Exception as e:
                 logger.warning(f"Metrics steps error {target}: {e}")
 
+            # Stress
+            try:
+                stress = garmin_client.get_stress_data(target)
+                if stress and isinstance(stress, dict):
+                    entry["stress_avg"] = stress.get("overallStressLevel") or None
+            except Exception as e:
+                logger.warning(f"Metrics stress error {target}: {e}")
+
+            # HRV
+            try:
+                hrv = garmin_client.get_hrv_data(target)
+                if hrv and isinstance(hrv, dict):
+                    s = hrv.get("hrvSummary", {})
+                    entry["hrv_overnight"] = s.get("lastNightAvg") or None
+            except Exception as e:
+                logger.warning(f"Metrics HRV error {target}: {e}")
+
+            # Training Readiness
+            try:
+                tr = garmin_client.get_training_readiness(target)
+                if tr and isinstance(tr, (dict, list)):
+                    if isinstance(tr, list) and len(tr) > 0:
+                        tr = tr[0]
+                    if isinstance(tr, dict):
+                        entry["training_readiness"] = tr.get("score") or tr.get("trainingReadinessScore") or None
+            except Exception as e:
+                logger.warning(f"Metrics TR error {target}: {e}")
+
         # --- YAZIO data ---
         try:
             yazio = await get_yazio_daily(target)
@@ -868,6 +896,9 @@ async def health_metrics_endpoint(days: int = 14):
         "carbs": {"label": "Carbs", "unit": "g", "color": "#22d3ee"},
         "fat": {"label": "Fat", "unit": "g", "color": "#a78bfa"},
         "calorie_delta": {"label": "Calorie Δ (surplus/deficit)", "unit": "kcal", "color": "#f59e0b"},
+        "stress_avg": {"label": "Stress moyen", "unit": "", "color": "#ef4444"},
+        "hrv_overnight": {"label": "HRV nocturne", "unit": "ms", "color": "#06b6d4"},
+        "training_readiness": {"label": "Training Readiness", "unit": "", "color": "#8b5cf6"},
     }
 
     return {
