@@ -1,9 +1,10 @@
 """
-Health OS API v4.4.0 - Added Sleep Stages endpoint
+Health OS API v4.5.0 - Added Sleep Stages + Correlation Explorer
 - Garmin: Token-based authentication (generate tokens locally first)
 - YAZIO: OAuth v15 for auth + individual food items with full macros
 - Quick Notes: CRUD for Notion-backed notes widget
 - Sleep Stages: Breakdown by cycle (deep, light, REM, awake)
+- Health Metrics: All metrics aggregated for correlation analysis
 - FIX: YAZIO nutrients are PER GRAM, not per 100g
 
 Deploy on Railway
@@ -30,7 +31,7 @@ logger = logging.getLogger(__name__)
 app = FastAPI(
     title="Health OS API",
     description="Aggregates health data from Garmin Connect and YAZIO",
-    version="4.4.0"
+    version="4.5.0"
 )
 
 # CORS for widget access
@@ -337,7 +338,7 @@ async def root():
     return {
         "status": "ok",
         "service": "Health OS API",
-        "version": "4.4.0",
+        "version": "4.5.0",
         "timestamp": datetime.now().isoformat(),
         "config": {
             "garmin_token_set": bool(GARMIN_OAUTH_TOKEN),
@@ -771,6 +772,113 @@ async def get_sleep_stages(days: int = 7):
             "rem": stage_stats("rem"),
             "awake": stage_stats("awake"),
         }
+    }
+
+
+# ============================================
+# HEALTH METRICS ENDPOINT (for Correlation Explorer)
+# ============================================
+
+@app.get("/health-metrics")
+async def health_metrics_endpoint(days: int = 14):
+    """Returns all available health metrics per day for the last N days.
+    Used by the Correlation Explorer widget to compare any two variables.
+    Combines Garmin (sleep, body battery, HR, steps) + YAZIO (nutrition)."""
+    global garmin_client
+
+    if not garmin_client:
+        garmin_client = init_garmin()
+
+    today = date.today()
+    results = []
+
+    for i in range(days - 1, -1, -1):  # oldest first
+        target = (today - timedelta(days=i)).isoformat()
+        entry = {"date": target}
+
+        # --- Garmin data ---
+        if garmin_client:
+            # Sleep
+            try:
+                sleep_data = garmin_client.get_sleep_data(target)
+                if sleep_data and isinstance(sleep_data, dict):
+                    daily = sleep_data.get("dailySleepDTO", {})
+                    sleep_seconds = daily.get("sleepTimeSeconds", 0) or 0
+                    entry["sleep_hours"] = round(sleep_seconds / 3600, 2) if sleep_seconds else None
+                    entry["sleep_score"] = daily.get("sleepScores", {}).get("overall", {}).get("value", 0) or None
+                    deep_s = daily.get("deepSleepSeconds", 0) or 0
+                    light_s = daily.get("lightSleepSeconds", 0) or 0
+                    rem_s = daily.get("remSleepSeconds", 0) or 0
+                    awake_s = daily.get("awakeSleepSeconds", 0) or 0
+                    entry["deep_sleep"] = round(deep_s / 3600, 2) if deep_s else None
+                    entry["light_sleep"] = round(light_s / 3600, 2) if light_s else None
+                    entry["rem_sleep"] = round(rem_s / 3600, 2) if rem_s else None
+                    entry["awake_time"] = round(awake_s / 3600, 2) if awake_s else None
+                    entry["resting_hr"] = daily.get("restingHeartRate") or None
+            except Exception as e:
+                logger.warning(f"Metrics sleep error {target}: {e}")
+
+            # Body Battery
+            try:
+                bb_data = garmin_client.get_body_battery(target)
+                if bb_data and isinstance(bb_data, list) and len(bb_data) > 0:
+                    max_bb = 0
+                    for item in bb_data:
+                        if isinstance(item, dict):
+                            val = item.get("chargedValue", 0) or item.get("charged", 0) or item.get("bodyBatteryLevel", 0) or 0
+                            if val > max_bb:
+                                max_bb = val
+                    entry["body_battery"] = max_bb if max_bb > 0 else None
+            except Exception as e:
+                logger.warning(f"Metrics BB error {target}: {e}")
+
+            # Steps
+            try:
+                steps_data = garmin_client.get_daily_steps(target, target)
+                if steps_data and isinstance(steps_data, list) and len(steps_data) > 0:
+                    entry["steps"] = steps_data[0].get("totalSteps", 0) or None
+            except Exception as e:
+                logger.warning(f"Metrics steps error {target}: {e}")
+
+        # --- YAZIO data ---
+        try:
+            yazio = await get_yazio_daily(target)
+            if yazio:
+                entry["calories"] = yazio.get("calories") or None
+                entry["calories_goal"] = yazio.get("caloriesGoal") or None
+                entry["protein"] = yazio.get("protein") or None
+                entry["carbs"] = yazio.get("carbs") or None
+                entry["fat"] = yazio.get("fat") or None
+                cal = yazio.get("calories", 0) or 0
+                goal = yazio.get("caloriesGoal", 0) or 0
+                if cal > 0 and goal > 0:
+                    entry["calorie_delta"] = cal - goal
+        except Exception as e:
+            logger.warning(f"Metrics YAZIO error {target}: {e}")
+
+        results.append(entry)
+
+    available = {
+        "sleep_hours": {"label": "Sleep Duration (h)", "unit": "h", "color": "#7eb8f7"},
+        "sleep_score": {"label": "Sleep Score", "unit": "", "color": "#c8a2ff"},
+        "deep_sleep": {"label": "Deep Sleep (h)", "unit": "h", "color": "#5b8def"},
+        "light_sleep": {"label": "Light Sleep (h)", "unit": "h", "color": "#888"},
+        "rem_sleep": {"label": "REM Sleep (h)", "unit": "h", "color": "#a78bfa"},
+        "awake_time": {"label": "Awake Time (h)", "unit": "h", "color": "#f2a174"},
+        "body_battery": {"label": "Body Battery", "unit": "", "color": "#4ade80"},
+        "resting_hr": {"label": "Resting HR", "unit": "bpm", "color": "#f87171"},
+        "steps": {"label": "Steps", "unit": "", "color": "#fbbf24"},
+        "calories": {"label": "Calories", "unit": "kcal", "color": "#fb923c"},
+        "protein": {"label": "Protein", "unit": "g", "color": "#e879f9"},
+        "carbs": {"label": "Carbs", "unit": "g", "color": "#22d3ee"},
+        "fat": {"label": "Fat", "unit": "g", "color": "#a78bfa"},
+        "calorie_delta": {"label": "Calorie Δ (surplus/deficit)", "unit": "kcal", "color": "#f59e0b"},
+    }
+
+    return {
+        "days": days,
+        "data": results,
+        "metrics": available,
     }
 
 
