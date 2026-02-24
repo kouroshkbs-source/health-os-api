@@ -810,33 +810,19 @@ async def health_metrics_endpoint(days: int = 14):
                     entry["awake_time"] = round(awake_s / 3600, 2) if awake_s else None
                     entry["resting_hr"] = daily.get("restingHeartRate") or None
 
-                    # Bedtime & wake time (decimal hours, e.g. 23.5 = 23h30)
-                    sleep_start = daily.get("sleepStartTimestampLocal")
-                    sleep_end = daily.get("sleepEndTimestampLocal")
-                    if sleep_start:
-                        try:
-                            # Garmin gives millisecond timestamps
-                            if isinstance(sleep_start, (int, float)) and sleep_start > 1e10:
-                                from datetime import timezone
-                                dt = datetime.fromtimestamp(sleep_start / 1000)
-                            else:
-                                dt = datetime.fromisoformat(str(sleep_start))
-                            bedtime = dt.hour + dt.minute / 60
-                            # Shift: if before 18h, treat as after-midnight (add 24)
-                            if bedtime < 18:
-                                bedtime += 24
-                            entry["bedtime"] = round(bedtime, 2)
-                        except Exception:
-                            pass
-                    if sleep_end:
-                        try:
-                            if isinstance(sleep_end, (int, float)) and sleep_end > 1e10:
-                                dt = datetime.fromtimestamp(sleep_end / 1000)
-                            else:
-                                dt = datetime.fromisoformat(str(sleep_end))
-                            entry["waketime"] = round(dt.hour + dt.minute / 60, 2)
-                        except Exception:
-                            pass
+                    # Bedtime & wake time — timezone-safe via modulo
+                    # sleepStartTimestampLocal is ms since epoch with local TZ offset baked in
+                    sleep_start_ts = daily.get("sleepStartTimestampLocal")
+                    sleep_end_ts = daily.get("sleepEndTimestampLocal")
+                    if sleep_start_ts and isinstance(sleep_start_ts, (int, float)):
+                        secs_in_day = (sleep_start_ts / 1000) % 86400
+                        bedtime = secs_in_day / 3600  # decimal hours (e.g. 2.82 = 2:49 AM)
+                        if bedtime < 18:  # after midnight → shift for correlation continuity
+                            bedtime += 24  # 2:49 AM → 26.82
+                        entry["bedtime"] = round(bedtime, 2)
+                    if sleep_end_ts and isinstance(sleep_end_ts, (int, float)):
+                        secs_in_day = (sleep_end_ts / 1000) % 86400
+                        entry["waketime"] = round(secs_in_day / 3600, 2)
             except Exception as e:
                 logger.warning(f"Metrics sleep error {target}: {e}")
 
