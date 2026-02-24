@@ -1547,6 +1547,51 @@ async def debug_sleep(date_str: Optional[str] = None):
     return result
 
 
+@app.get("/debug-yazio")
+async def debug_yazio(date_str: Optional[str] = None):
+    """Debug YAZIO login and data fetch."""
+    if not date_str:
+        date_str = date.today().isoformat()
+
+    result = {
+        "email_set": bool(YAZIO_EMAIL),
+        "password_set": bool(YAZIO_PASSWORD),
+    }
+
+    try:
+        token = await yazio_login()
+        result["token_obtained"] = bool(token)
+        if not token:
+            result["error"] = "Login returned no token"
+            return result
+    except Exception as e:
+        result["login_error"] = str(e)
+        return result
+
+    try:
+        headers = {"Authorization": f"Bearer {token}", "Accept": "application/json"}
+        url = f"{YAZIO_BASE_URL}/user/widgets/daily-summary?date={date_str}"
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(url, headers=headers)
+            result["daily_status"] = resp.status_code
+            if resp.status_code == 200:
+                d = resp.json()
+                result["daily_keys"] = list(d.keys()) if isinstance(d, dict) else str(type(d))
+                result["daily_raw"] = d
+            else:
+                result["daily_error"] = resp.text[:500]
+    except Exception as e:
+        result["daily_error"] = str(e)
+
+    try:
+        yazio = await get_yazio_daily(date_str)
+        result["parsed"] = yazio
+    except Exception as e:
+        result["parse_error"] = str(e)
+
+    return result
+
+
 # ============================================
 # RUN SERVER
 # ============================================
