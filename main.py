@@ -13,6 +13,8 @@ import os
 import json
 import logging
 import tempfile
+import asyncio
+import time
 from datetime import datetime, date, timedelta
 from typing import Optional
 import httpx
@@ -226,13 +228,22 @@ def get_garmin_data(target_date: str = None) -> dict:
 # YAZIO FUNCTIONS
 # ============================================
 
+# YAZIO token cache
+_yazio_cached_token = None
+_yazio_token_time = 0
+
 async def yazio_login() -> Optional[str]:
-    """Login to YAZIO and return access token."""
-    global yazio_token
+    """Login to YAZIO and return access token. Caches token for 30 min."""
+    global _yazio_cached_token, _yazio_token_time
     
     if not YAZIO_EMAIL or not YAZIO_PASSWORD:
         logger.warning("YAZIO credentials not set")
         return None
+    
+    # Return cached token if fresh (< 30 min)
+    now = time.time()
+    if _yazio_cached_token and (now - _yazio_token_time) < 1800:
+        return _yazio_cached_token
     
     logger.info(f"Logging into YAZIO with {YAZIO_EMAIL}...")
     
@@ -252,9 +263,11 @@ async def yazio_login() -> Optional[str]:
             logger.info(f"YAZIO login response status: {resp.status_code}")
             
             if resp.status_code == 200:
-                yazio_token = resp.json()
+                token = resp.json().get("access_token")
+                _yazio_cached_token = token
+                _yazio_token_time = now
                 logger.info("YAZIO login successful!")
-                return yazio_token.get("access_token")
+                return token
             else:
                 logger.error(f"YAZIO login failed: {resp.text}")
                 return None
@@ -880,19 +893,26 @@ async def health_metrics_endpoint(days: int = 14):
         try:
             yazio = await get_yazio_daily(target)
             if yazio:
-                entry["calories"] = yazio.get("calories") or None
+                c = yazio.get("calories")
+                entry["calories"] = c if c is not None and c > 0 else None
                 entry["calories_goal"] = yazio.get("caloriesGoal") or None
-                entry["protein"] = yazio.get("protein") or None
-                entry["carbs"] = yazio.get("carbs") or None
-                entry["fat"] = yazio.get("fat") or None
-                cal = yazio.get("calories", 0) or 0
-                goal = yazio.get("caloriesGoal", 0) or 0
+                p = yazio.get("protein")
+                entry["protein"] = round(p) if p is not None and p > 0 else None
+                cb = yazio.get("carbs")
+                entry["carbs"] = round(cb) if cb is not None and cb > 0 else None
+                f = yazio.get("fat")
+                entry["fat"] = round(f) if f is not None and f > 0 else None
+                cal = c or 0
+                goal = yazio.get("caloriesGoal") or 0
                 if cal > 0 and goal > 0:
-                    entry["calorie_delta"] = cal - goal
+                    entry["calorie_delta"] = round(cal - goal)
         except Exception as e:
             logger.warning(f"Metrics YAZIO error {target}: {e}")
 
         results.append(entry)
+
+        # Small delay to avoid YAZIO rate limiting
+        await asyncio.sleep(0.3)
 
     available = {
         "sleep_hours": {"label": "Sleep Duration (h)", "unit": "h", "color": "#7eb8f7"},
