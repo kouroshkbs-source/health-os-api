@@ -808,7 +808,7 @@ async def health_metrics_endpoint(days: int = 14):
                     entry["light_sleep"] = round(light_s / 3600, 2) if light_s else None
                     entry["rem_sleep"] = round(rem_s / 3600, 2) if rem_s else None
                     entry["awake_time"] = round(awake_s / 3600, 2) if awake_s else None
-                    entry["resting_hr"] = daily.get("restingHeartRate") or None
+                    entry["resting_hr"] = daily.get("restingHeartRate") or daily.get("avgHeartRate") or None
 
                     # Bedtime & wake time — timezone-safe via modulo
                     # sleepStartTimestampLocal is ms since epoch with local TZ offset baked in
