@@ -1,442 +1,360 @@
 #!/usr/bin/env python3
 """
-Garmin → Notion Sync Script for GitHub Actions.
-Fetches health data from Garmin and writes it to Notion Journal database.
+Garmin → Notion Sync (Cookie-based)
+
+Uses browser session cookies instead of OAuth (garth) to avoid the
+permanent rate-limit ban on the mobile OAuth endpoint.
+
+Secrets required:
+  GARMIN_COOKIE  - Full cookie string from browser session
+  GARMIN_CSRF    - Connect-Csrf-Token header value
+  NOTION_TOKEN   - Notion integration token
+
+Exit codes:
+  0  - Success (or no data available yet)
+  1  - Generic error (Notion down, network issue)
+  41 - Auth error (cookies expired) → triggers circuit breaker
+  42 - Rate limit (429) → triggers circuit breaker
 """
 
 import os
+import sys
 import json
-import tempfile
-import httpx
+import requests
 from datetime import date, timedelta
 
-from garminconnect import Garmin
+# ── Config ────────────────────────────────────────────────────────
+GARMIN_COOKIE = os.environ.get("GARMIN_COOKIE", "")
+GARMIN_CSRF = os.environ.get("GARMIN_CSRF", "")
+NOTION_TOKEN = os.environ.get("NOTION_TOKEN", "")
+NOTION_DB_ID = "2deda7da88db811f98f5f860d49af03d"
 
-# ============================================
-# ENVIRONMENT VARIABLES
-# ============================================
-GARMIN_OAUTH_TOKEN = os.getenv("GARMIN_OAUTH_TOKEN")
-GARMIN_DISPLAY_NAME = os.getenv("GARMIN_DISPLAY_NAME")
-NOTION_TOKEN = os.getenv("NOTION_TOKEN")
-
-# Notion Database ID (Journal)
-NOTION_DATABASE_ID = "2deda7da-88db-811f-98f5-f860d49af03d"
-NOTION_API_URL = "https://api.notion.com/v1"
-
-# ============================================
-# GARMIN FUNCTIONS
-# ============================================
-
-def get_garmin_client():
-    """Initialize Garmin client with OAuth tokens."""
-    if not GARMIN_OAUTH_TOKEN:
-        raise Exception("GARMIN_OAUTH_TOKEN not set")
-    
-    token_data = json.loads(GARMIN_OAUTH_TOKEN)
-    
-    # Create temp directory for token files
-    temp_dir = tempfile.mkdtemp()
-    
-    # Write oauth1 token
-    oauth1_file = os.path.join(temp_dir, "oauth1_token.json")
-    oauth1_data = token_data.get("oauth1_token", {})
-    with open(oauth1_file, 'w') as f:
-        json.dump(oauth1_data, f)
-    
-    # Write oauth2 token
-    oauth2_file = os.path.join(temp_dir, "oauth2_token.json")
-    oauth2_data = token_data.get("oauth2_token", {})
-    with open(oauth2_file, 'w') as f:
-        json.dump(oauth2_data, f)
-    
-    # Initialize client and load tokens
-    client = Garmin()
-    client.garth.load(temp_dir)
-    
-    # Force display_name (bypass profile fetch)
-    if GARMIN_DISPLAY_NAME:
-        print(f"✅ Using GARMIN_DISPLAY_NAME: {GARMIN_DISPLAY_NAME}")
-        client.display_name = GARMIN_DISPLAY_NAME
-        client.full_name = GARMIN_DISPLAY_NAME
-    else:
-        raise Exception("GARMIN_DISPLAY_NAME not set")
-    
-    return client
+GARMIN_BASE = "https://connect.garmin.com/gc-api"
+NOTION_BASE = "https://api.notion.com/v1"
 
 
-def fetch_garmin_data(client, target_date: str) -> dict:
-    """Fetch health metrics for a specific date."""
-    print(f"\n📊 Fetching Garmin data for {target_date}...")
-    
-    results = {
-        "date": target_date,
-        "bodyBattery": 0,
-        "sleepScore": 0,
-        "sleepDuration": "0h 00",
-        "sleepSeconds": 0,
-        "weight": 0.0,
-        "weightChange": 0.0,
-        "steps": 0,
+# ── Garmin API ────────────────────────────────────────────────────
+def garmin_headers():
+    return {
+        "Cookie": GARMIN_COOKIE,
+        "Connect-Csrf-Token": GARMIN_CSRF,
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:149.0) "
+                      "Gecko/20100101 Firefox/149.0",
+        "Accept": "*/*",
+        "Accept-Language": "fr,fr-FR;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Sec-Fetch-Dest": "empty",
+        "Sec-Fetch-Mode": "cors",
+        "Sec-Fetch-Site": "same-origin",
+        "Connection": "keep-alive",
     }
-    
-    # Body Battery
-    try:
-        bb_data = client.get_body_battery(target_date)
-        print(f"   Body Battery raw: {type(bb_data)} - {len(bb_data) if isinstance(bb_data, list) else 'N/A'} items")
-        if bb_data and isinstance(bb_data, list) and len(bb_data) > 0:
-            # Get the max charged value of the day
-            max_bb = 0
-            for item in bb_data:
-                if isinstance(item, dict):
-                    val = item.get("chargedValue", 0) or item.get("charged", 0) or item.get("bodyBatteryLevel", 0) or 0
-                    if val > max_bb:
-                        max_bb = val
-            results["bodyBattery"] = max_bb
-        print(f"   ✓ Body Battery: {results['bodyBattery']}")
-    except Exception as e:
-        print(f"   ❌ Body Battery error: {e}")
-    
-    # Sleep
-    try:
-        sleep_data = client.get_sleep_data(target_date)
-        print(f"   Sleep raw type: {type(sleep_data)}")
-        if sleep_data and isinstance(sleep_data, dict):
-            daily_sleep = sleep_data.get("dailySleepDTO", {})
-            
-            # Sleep score
-            sleep_scores = daily_sleep.get("sleepScores", {})
-            if sleep_scores:
-                overall = sleep_scores.get("overall", {})
-                results["sleepScore"] = overall.get("value", 0) if isinstance(overall, dict) else 0
-            
-            # Sleep duration
-            sleep_seconds = daily_sleep.get("sleepTimeSeconds", 0)
-            if sleep_seconds:
-                results["sleepSeconds"] = sleep_seconds
-                hours = sleep_seconds // 3600
-                minutes = (sleep_seconds % 3600) // 60
-                results["sleepDuration"] = f"{hours}h {minutes:02d}"
-        
-        print(f"   ✓ Sleep: {results['sleepDuration']}, Score: {results['sleepScore']}")
-    except Exception as e:
-        print(f"   ❌ Sleep error: {e}")
-    
-    # Weight (look back 14 days + extend to tomorrow for UTC coverage)
-    try:
-        start_date = (date.fromisoformat(target_date) - timedelta(days=14)).isoformat()
-        end_date = (date.fromisoformat(target_date) + timedelta(days=1)).isoformat()
-        
-        weight_data = client.get_body_composition(start_date, end_date)
-        print(f"   Weight raw type: {type(weight_data)}")
-        
-        if weight_data and isinstance(weight_data, dict):
-            weights = weight_data.get("dateWeightList", []) or weight_data.get("weightList", [])
-            
-            if weights and len(weights) > 0:
-                print(f"   DEBUG: Found {len(weights)} weight entries")
-                
-                # Fonction de tri robuste (retourne tuple pour éviter int vs str)
-                def sort_key(w):
-                    for k in ("timestampGMT", "timestampLocal", "gmtTimestamp"):
-                        v = w.get(k)
-                        if isinstance(v, (int, float)):
-                            return (1, int(v))  # 1 = priorité timestamp
-                    for k in ("calendarDate", "date"):
-                        v = w.get(k)
-                        if isinstance(v, str) and len(v) >= 10:
-                            return (0, v[:10])  # 0 = fallback date string
-                    return (0, "0000-00-00")
-                
-                # Filtrer les entrées valides (poids > 0)
-                weights_valid = [w for w in weights if (w.get("weight") or 0) > 0]
-                
-                # Debug: afficher toutes les entrées avec leur clé de tri
-                for i, w in enumerate(weights_valid):
-                    w_kg = w.get("weight", 0) / 1000
-                    w_date = w.get("calendarDate", w.get("date", "unknown"))
-                    w_ts = w.get("timestampGMT", w.get("gmtTimestamp", "N/A"))
-                    print(f"      [{i}] KEY={sort_key(w)} | {w_date} | ts={w_ts} | {w_kg} kg")
-                
-                if weights_valid:
-                    weights_sorted = sorted(weights_valid, key=sort_key, reverse=True)
-                    latest = weights_sorted[0]
-                    weight_grams = latest.get("weight", 0)
-                    
-                    results["weight"] = round(weight_grams / 1000, 1)
-                    latest_date = latest.get("calendarDate", "unknown")
-                    latest_ts = latest.get("timestampGMT", latest.get("gmtTimestamp", "N/A"))
-                    print(f"   DEBUG: Selected = {latest_date} (ts={latest_ts}) = {results['weight']} kg")
-                    
-                    if len(weights_sorted) > 1:
-                        oldest = weights_sorted[-1]
-                        first_weight = oldest.get("weight", 0) / 1000
-                        results["weightChange"] = round(results["weight"] - first_weight, 1)
-                else:
-                    print("   ⚠️ No valid weight entries (all have weight=0)")
-        
-        print(f"   ✓ Weight: {results['weight']} kg (change: {results['weightChange']})")
-    except Exception as e:
-        print(f"   ❌ Weight error: {e}")
-    
-    # Steps - try multiple methods
-    try:
-        # Method 1: Try get_daily_steps with start and end date
-        try:
-            steps_data = client.get_daily_steps(target_date, target_date)
-            print(f"   Steps (daily_steps) raw: {type(steps_data)}")
-            if steps_data:
-                if isinstance(steps_data, list) and len(steps_data) > 0:
-                    # Get the last entry which should have total steps
-                    for item in reversed(steps_data):
-                        if isinstance(item, dict) and item.get("totalSteps", 0) > 0:
-                            results["steps"] = item.get("totalSteps", 0)
-                            break
-                        elif isinstance(item, dict) and item.get("steps", 0) > 0:
-                            results["steps"] = item.get("steps", 0)
-                            break
-                elif isinstance(steps_data, dict):
-                    results["steps"] = steps_data.get("totalSteps", 0) or steps_data.get("steps", 0) or 0
-            print(f"   ✓ Steps (method 1): {results['steps']}")
-        except Exception as e1:
-            print(f"   ⚠️ Method 1 failed: {e1}")
-            
-            # Method 2: Try getting steps from activities endpoint
-            try:
-                activities = client.get_activities_fordate(target_date)
-                print(f"   Activities raw: {type(activities)}")
-                if activities and isinstance(activities, list):
-                    total_steps = 0
-                    for act in activities:
-                        if isinstance(act, dict):
-                            total_steps += act.get("steps", 0) or 0
-                    if total_steps > 0:
-                        results["steps"] = total_steps
-                print(f"   ✓ Steps (method 2 - activities): {results['steps']}")
-            except Exception as e2:
-                print(f"   ⚠️ Method 2 failed: {e2}")
-                
-                # Method 3: Direct API call to steps endpoint
-                try:
-                    steps_endpoint = client.garth.connectapi(f"/usersummary-service/stats/steps/daily/{target_date}/{target_date}")
-                    print(f"   Direct steps API: {type(steps_endpoint)}")
-                    if steps_endpoint and isinstance(steps_endpoint, list) and len(steps_endpoint) > 0:
-                        results["steps"] = steps_endpoint[0].get("totalSteps", 0) or 0
-                    print(f"   ✓ Steps (method 3 - direct): {results['steps']}")
-                except Exception as e3:
-                    print(f"   ❌ All step methods failed: {e3}")
-                    
-    except Exception as e:
-        print(f"   ❌ Steps error: {e}")
-    
-    return results
 
 
-# ============================================
-# NOTION FUNCTIONS
-# ============================================
+def garmin_get(url, label="API"):
+    """GET with auth error handling — exits on 401/403/429."""
+    try:
+        r = requests.get(url, headers=garmin_headers(), timeout=20)
+    except requests.RequestException as e:
+        print(f"   ⚠️ {label} network error: {e}")
+        return None
 
+    if r.status_code in (401, 403):
+        # Check if it's an HTML redirect to login (JWT expired)
+        if r.text.strip().startswith("<!DOCTYPE") or "Sign In" in r.text:
+            print(f"   ❌ {label}: Auth error — cookies/JWT expired (got login page)")
+            sys.exit(41)
+        # Some gc-api endpoints return 403 normally (e.g. Heart Rate)
+        print(f"   ⚠️ {label}: {r.status_code} (may be normal for this endpoint)")
+        return None
+
+    if r.status_code == 429:
+        print(f"   ❌ {label}: Rate limited (429)")
+        sys.exit(42)
+
+    if r.status_code != 200:
+        print(f"   ⚠️ {label}: HTTP {r.status_code}")
+        return None
+
+    # Check for HTML login redirect on 200
+    body = r.text[:200]
+    if body.strip().startswith("<!DOCTYPE") or "Sign In" in body:
+        print(f"   ❌ {label}: Got login page on 200 — session expired")
+        sys.exit(41)
+
+    try:
+        return r.json()
+    except json.JSONDecodeError:
+        print(f"   ⚠️ {label}: Invalid JSON response")
+        return None
+
+
+# ── Data fetching ─────────────────────────────────────────────────
+def fetch_sleep(target_date):
+    url = (f"{GARMIN_BASE}/sleep-service/sleep/dailySleepData"
+           f"?date={target_date}&nonSleepBufferMinutes=60")
+    return garmin_get(url, "Sleep")
+
+
+def fetch_body_battery(target_date):
+    prev = (date.fromisoformat(target_date) - timedelta(days=1)).isoformat()
+    url = (f"{GARMIN_BASE}/wellness-service/wellness/bodyBattery"
+           f"/reports/daily?startDate={prev}&endDate={target_date}")
+    return garmin_get(url, "Body Battery")
+
+
+def fetch_steps(target_date):
+    url = (f"{GARMIN_BASE}/usersummary-service/stats/steps"
+           f"/daily/{target_date}/{target_date}")
+    return garmin_get(url, "Steps")
+
+
+def fetch_weight(target_date):
+    start = (date.fromisoformat(target_date) - timedelta(days=7)).isoformat()
+    url = (f"{GARMIN_BASE}/weight-service/weight"
+           f"/dateRange?startDate={start}&endDate={target_date}")
+    return garmin_get(url, "Weight")
+
+
+# ── Parsing ───────────────────────────────────────────────────────
+def extract_sleep_score(sleep_data):
+    """Extract sleep score from various possible JSON locations."""
+    if not sleep_data or "dailySleepDTO" not in sleep_data:
+        return 0
+
+    dto = sleep_data["dailySleepDTO"]
+
+    # Try multiple known locations for sleep score
+    # Location 1: sleepScores.overall.value
+    scores = dto.get("sleepScores", {})
+    if scores:
+        overall = scores.get("overall", scores.get("overallScore", {}))
+        if isinstance(overall, dict) and "value" in overall:
+            return overall["value"]
+        # Location 2: sleepScores.qualityScore.value
+        quality = scores.get("qualityScore", {})
+        if isinstance(quality, dict) and "value" in quality:
+            return quality["value"]
+
+    # Location 3: top-level sleepScore
+    if "sleepScore" in dto:
+        return dto["sleepScore"]
+
+    # Location 4: overallScore at top level
+    if "overallScore" in dto:
+        val = dto["overallScore"]
+        return val.get("value", val) if isinstance(val, dict) else val
+
+    return 0
+
+
+def parse_garmin_data(target_date):
+    """Fetch and parse all Garmin data for a given date."""
+    data = {
+        "sleep_score": 0,
+        "sleep_duration": "0h 00",
+        "body_battery": 0,
+        "steps": 0,
+        "weight": 0.0,
+    }
+
+    # ── Sleep ──
+    sleep = fetch_sleep(target_date)
+    if sleep and "dailySleepDTO" in sleep:
+        dto = sleep["dailySleepDTO"]
+        seconds = dto.get("sleepTimeSeconds", 0)
+        if seconds > 0:
+            hours = seconds // 3600
+            minutes = (seconds % 3600) // 60
+            data["sleep_duration"] = f"{hours}h {minutes:02d}"
+        data["sleep_score"] = extract_sleep_score(sleep)
+
+    # ── Body Battery ──
+    bb = fetch_body_battery(target_date)
+    if bb and isinstance(bb, list):
+        # Find entry for target date
+        for entry in bb:
+            if entry.get("date") == target_date:
+                data["body_battery"] = entry.get("charged", 0)
+                break
+        # Fallback: use last entry
+        if data["body_battery"] == 0 and bb:
+            data["body_battery"] = bb[-1].get("charged", 0)
+
+    # ── Steps ──
+    steps = fetch_steps(target_date)
+    if steps and isinstance(steps, list):
+        for entry in steps:
+            if entry.get("calendarDate") == target_date:
+                data["steps"] = entry.get("totalSteps", 0)
+                break
+
+    # ── Weight ──
+    weight = fetch_weight(target_date)
+    if weight and "dateWeightList" in weight:
+        wl = weight["dateWeightList"]
+        if wl:
+            # Weight from API is in grams
+            w = wl[-1].get("weight", 0)
+            if w > 1000:  # sanity check: must be in grams
+                data["weight"] = round(w / 1000, 1)
+            elif w > 0:
+                data["weight"] = round(w, 1)
+
+    return data
+
+
+# ── Notion API ────────────────────────────────────────────────────
 def notion_headers():
-    """Get headers for Notion API requests."""
     return {
         "Authorization": f"Bearer {NOTION_TOKEN}",
+        "Notion-Version": "2022-06-28",
         "Content-Type": "application/json",
-        "Notion-Version": "2022-06-28"
     }
 
 
-def find_journal_entry(target_date: str) -> dict | None:
-    """Find existing Journal entry for a specific date."""
-    print(f"\n🔍 Searching for Journal entry on {target_date}...")
-    
-    url = f"{NOTION_API_URL}/databases/{NOTION_DATABASE_ID}/query"
-    
+def find_journal_entry(target_date):
+    """Find existing journal entry for the given date. Returns page_id or None."""
+    url = f"{NOTION_BASE}/databases/{NOTION_DB_ID}/query"
     payload = {
         "filter": {
             "property": "Date",
-            "date": {
-                "equals": target_date
-            }
+            "date": {"equals": target_date}
         }
     }
-    
-    response = httpx.post(url, headers=notion_headers(), json=payload)
-    
-    if response.status_code == 200:
-        data = response.json()
-        results = data.get("results", [])
-        if results:
-            print(f"   ✓ Found existing entry: {results[0]['id']}")
-            return results[0]
-        else:
-            print(f"   ℹ️ No entry found for {target_date}")
+    try:
+        r = requests.post(url, headers=notion_headers(), json=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"   ⚠️ Notion query error: {r.status_code}")
             return None
-    else:
-        print(f"   ❌ Notion query error: {response.status_code} - {response.text}")
+        results = r.json().get("results", [])
+        return results[0]["id"] if results else None
+    except requests.RequestException as e:
+        print(f"   ⚠️ Notion query network error: {e}")
         return None
 
 
-def create_journal_entry(target_date: str, garmin_data: dict) -> dict | None:
-    """Create a new Journal entry with Garmin data."""
-    print(f"\n📝 Creating new Journal entry for {target_date}...")
-    
-    url = f"{NOTION_API_URL}/pages"
-    
-    # Build properties - only include non-zero values
-    properties = {
-        "Date": {
-            "date": {"start": target_date}
-        },
-    }
-    
-    if garmin_data["weight"] > 0:
-        properties["Weight"] = {"number": garmin_data["weight"]}
-    
-    if garmin_data["sleepScore"] > 0:
-        properties["Sleep score"] = {"number": garmin_data["sleepScore"]}
-    
-    if garmin_data["bodyBattery"] > 0:
-        properties["Body battery"] = {"number": garmin_data["bodyBattery"]}
-    
-    if garmin_data["sleepDuration"] != "0h 00":
-        properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
-    
-    if garmin_data.get("steps", 0) > 0:
-        properties["Steps"] = {"number": garmin_data["steps"]}
-    
-    payload = {
-        "parent": {"database_id": NOTION_DATABASE_ID},
-        "properties": properties
-    }
-    
-    response = httpx.post(url, headers=notion_headers(), json=payload)
-    
-    if response.status_code == 200:
-        data = response.json()
-        print(f"   ✓ Created entry: {data['id']}")
-        return data
-    else:
-        print(f"   ❌ Notion create error: {response.status_code} - {response.text}")
-        return None
-
-
-def update_journal_entry(page_id: str, garmin_data: dict) -> bool:
-    """Update existing Journal entry with Garmin data."""
-    print(f"\n📝 Updating Journal entry {page_id}...")
-    
-    url = f"{NOTION_API_URL}/pages/{page_id}"
-    
-    # Build properties - only include non-zero values
+def update_notion_entry(page_id, data):
+    """Update existing Notion page with Garmin data."""
+    url = f"{NOTION_BASE}/pages/{page_id}"
     properties = {}
-    
-    if garmin_data["weight"] > 0:
-        properties["Weight"] = {"number": garmin_data["weight"]}
-    
-    if garmin_data["sleepScore"] > 0:
-        properties["Sleep score"] = {"number": garmin_data["sleepScore"]}
-    
-    if garmin_data["bodyBattery"] > 0:
-        properties["Body battery"] = {"number": garmin_data["bodyBattery"]}
-    
-    if garmin_data["sleepDuration"] != "0h 00":
-        properties["Sleep duration"] = {"rich_text": [{"text": {"content": garmin_data["sleepDuration"]}}]}
-    
-    if garmin_data.get("steps", 0) > 0:
-        properties["Steps"] = {"number": garmin_data["steps"]}
-    
+
+    # Only update non-zero values to avoid overwriting existing data
+    if data["sleep_score"] > 0:
+        properties["Sleep score"] = {"number": data["sleep_score"]}
+    if data["sleep_duration"] != "0h 00":
+        properties["Sleep duration"] = {
+            "rich_text": [{"text": {"content": data["sleep_duration"]}}]
+        }
+    if data["body_battery"] > 0:
+        properties["Body battery"] = {"number": data["body_battery"]}
+    if data["steps"] > 0:
+        properties["Steps"] = {"number": data["steps"]}
+    if data["weight"] > 0:
+        properties["Weight"] = {"number": data["weight"]}
+
     if not properties:
-        print("   ℹ️ No Garmin data to update")
+        print("   ⚠️ No non-zero data to update")
         return True
-    
-    payload = {"properties": properties}
-    
-    response = httpx.patch(url, headers=notion_headers(), json=payload)
-    
-    if response.status_code == 200:
-        print(f"   ✓ Updated successfully")
+
+    try:
+        r = requests.patch(url, headers=notion_headers(),
+                           json={"properties": properties}, timeout=15)
+        if r.status_code != 200:
+            print(f"   ⚠️ Notion update error: {r.status_code} — {r.text[:200]}")
+            return False
         return True
-    else:
-        print(f"   ❌ Notion update error: {response.status_code} - {response.text}")
+    except requests.RequestException as e:
+        print(f"   ⚠️ Notion update network error: {e}")
         return False
 
 
-def sync_to_notion(garmin_data: dict) -> bool:
-    """Sync Garmin data to Notion Journal."""
-    target_date = garmin_data["date"]
-    
-    # Check if entry exists
-    existing = find_journal_entry(target_date)
-    
-    if existing:
-        # Update existing entry
-        return update_journal_entry(existing["id"], garmin_data)
-    else:
-        # Create new entry if we have ANY Garmin data
-        has_data = (
-            garmin_data["weight"] > 0 or 
-            garmin_data["sleepScore"] > 0 or 
-            garmin_data["bodyBattery"] > 0 or
-            garmin_data.get("steps", 0) > 0
-        )
-        if has_data:
-            result = create_journal_entry(target_date, garmin_data)
-            return result is not None
-        else:
-            print("   ℹ️ No Garmin data available, skipping entry creation")
-            return True
+def create_notion_entry(target_date, data):
+    """Create new Notion page with Garmin data."""
+    url = f"{NOTION_BASE}/pages"
+    properties = {
+        " ": {"title": [{"text": {"content": ""}}]},
+        "Date": {"date": {"start": target_date}},
+    }
 
+    if data["sleep_score"] > 0:
+        properties["Sleep score"] = {"number": data["sleep_score"]}
+    if data["sleep_duration"] != "0h 00":
+        properties["Sleep duration"] = {
+            "rich_text": [{"text": {"content": data["sleep_duration"]}}]
+        }
+    if data["body_battery"] > 0:
+        properties["Body battery"] = {"number": data["body_battery"]}
+    if data["steps"] > 0:
+        properties["Steps"] = {"number": data["steps"]}
+    if data["weight"] > 0:
+        properties["Weight"] = {"number": data["weight"]}
 
-# ============================================
-# MAIN
-# ============================================
-
-def main():
-    """Main entry point."""
-    print("🚀 GitHub Actions - Garmin → Notion Sync")
-    print("=" * 50)
-    
-    # Validate environment
-    if not NOTION_TOKEN:
-        raise Exception("NOTION_TOKEN not set")
-    
-    # Get today's date
-    today = date.today().isoformat()
-    
+    payload = {
+        "parent": {"database_id": NOTION_DB_ID},
+        "properties": properties,
+    }
     try:
-        # Initialize Garmin client
-        client = get_garmin_client()
-        print("✅ Garmin client initialized")
-        
-        # Fetch data for today
-        garmin_data = fetch_garmin_data(client, today)
-        
-        print("\n" + "=" * 50)
-        print("📋 GARMIN DATA:")
-        print(f"   Date: {garmin_data['date']}")
-        print(f"   Body Battery: {garmin_data['bodyBattery']}")
-        print(f"   Sleep Score: {garmin_data['sleepScore']}")
-        print(f"   Sleep Duration: {garmin_data['sleepDuration']}")
-        print(f"   Weight: {garmin_data['weight']} kg")
-        print(f"   Steps: {garmin_data.get('steps', 0)}")
-        print("=" * 50)
-        
-        # Sync to Notion
-        if garmin_data["weight"] > 0 or garmin_data["bodyBattery"] > 0 or garmin_data["sleepScore"] > 0 or garmin_data.get("steps", 0) > 0:
-            print("\n📤 Syncing to Notion...")
-            success = sync_to_notion(garmin_data)
-            
-            if success:
-                print("\n✅ SUCCESS! Garmin data synced to Notion!")
-            else:
-                print("\n❌ FAILED to sync to Notion")
-                raise Exception("Notion sync failed")
-        else:
-            print("\n⚠️ No Garmin data retrieved (all zeros)")
-            print("   This might be normal if run before syncing your watch")
-        
-    except Exception as e:
-        print(f"\n❌ ERROR: {e}")
-        raise
+        r = requests.post(url, headers=notion_headers(),
+                          json=payload, timeout=15)
+        if r.status_code != 200:
+            print(f"   ⚠️ Notion create error: {r.status_code} — {r.text[:200]}")
+            return False
+        return True
+    except requests.RequestException as e:
+        print(f"   ⚠️ Notion create network error: {e}")
+        return False
+
+
+# ── Main ──────────────────────────────────────────────────────────
+def main():
+    print("🚀 Garmin → Notion Sync (Cookie-based)")
+    print("=" * 50)
+
+    # Validate
+    if not GARMIN_COOKIE:
+        print("❌ GARMIN_COOKIE not set"); sys.exit(1)
+    if not GARMIN_CSRF:
+        print("❌ GARMIN_CSRF not set"); sys.exit(1)
+    if not NOTION_TOKEN:
+        print("❌ NOTION_TOKEN not set"); sys.exit(1)
+
+    target = date.today().isoformat()
+    print(f"📊 Fetching Garmin data for {target}...")
+
+    data = parse_garmin_data(target)
+
+    print(f"\n{'='*50}")
+    print(f"📋 GARMIN DATA:")
+    print(f"   Date: {target}")
+    print(f"   Sleep Score: {data['sleep_score']}")
+    print(f"   Sleep Duration: {data['sleep_duration']}")
+    print(f"   Body Battery: {data['body_battery']}")
+    print(f"   Steps: {data['steps']}")
+    print(f"   Weight: {data['weight']} kg")
+    print(f"{'='*50}")
+
+    # All zeros = no data yet (normal before watch sync)
+    if (data["sleep_score"] == 0 and data["steps"] == 0
+            and data["body_battery"] == 0):
+        print("\n⚠️ No Garmin data retrieved (all zeros)")
+        print("   This might be normal if run before syncing your watch")
+        sys.exit(0)
+
+    # Upsert to Notion
+    page_id = find_journal_entry(target)
+    if page_id:
+        print(f"\n📝 Updating existing entry...")
+        ok = update_notion_entry(page_id, data)
+    else:
+        print(f"\n📝 Creating new entry...")
+        ok = create_notion_entry(target, data)
+
+    if ok:
+        print("✅ Notion updated successfully!")
+    else:
+        print("❌ Failed to update Notion")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
+
